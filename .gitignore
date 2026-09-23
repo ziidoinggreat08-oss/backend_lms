@@ -1,0 +1,32 @@
+# Binary / build output
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+/main
+/backend_lms
+
+# Test output
+*.test
+*.out
+
+# Go module cache
+vendor/
+
+# Environment variables (JANGAN di-commit!)
+.env
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary / debug files
+hash.go
+
