@@ -24,6 +24,15 @@ func main() {
 
 	// Mendaftarkan Endpoint (Route) API
 	http.HandleFunc("/api/login", controllers.Login)
+	http.HandleFunc("/api/siswa", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost || r.Method == http.MethodOptions {
+			controllers.CreateSiswa(w, r)
+			return
+		}
+		controllers.ListSiswa(w, r)
+	})
+	http.HandleFunc("/api/siswa/", controllers.StudentByID)
+	http.HandleFunc("/api/kelas", controllers.ListKelas)
 
 	// Route root untuk testing
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
