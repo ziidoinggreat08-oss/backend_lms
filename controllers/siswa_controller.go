@@ -122,36 +122,6 @@ func ListSiswa(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(siswa)
 }
 
-func ListKelas(w http.ResponseWriter, r *http.Request) {
-	setJSON(w)
-	if r.Method == "OPTIONS" {
-		return
-	}
-	if r.Method != "GET" {
-		writeError(w, 405, "Metode tidak diizinkan")
-		return
-	}
-	if !requireAdmin(w, r) {
-		return
-	}
-	rows, err := config.DB.Query(`SELECT k.id, k.nama_kelas, j.id, j.nama_jurusan FROM kelas k JOIN jurusan j ON j.id = k.jurusan_id ORDER BY k.nama_kelas`)
-	if err != nil {
-		writeError(w, 500, "Gagal mengambil data kelas")
-		return
-	}
-	defer rows.Close()
-	kelas := make([]models.KelasOption, 0)
-	for rows.Next() {
-		var item models.KelasOption
-		if err := rows.Scan(&item.ID, &item.NamaKelas, &item.JurusanID, &item.NamaJurusan); err != nil {
-			writeError(w, 500, "Gagal membaca data kelas")
-			return
-		}
-		kelas = append(kelas, item)
-	}
-	json.NewEncoder(w).Encode(kelas)
-}
-
 func CreateSiswa(w http.ResponseWriter, r *http.Request) {
 	setJSON(w)
 	if r.Method == "OPTIONS" {

@@ -46,3 +46,17 @@ type KelasOption struct {
 	JurusanID   int    `json:"jurusan_id"`
 	NamaJurusan string `json:"nama_jurusan"`
 }
+
+type JurusanOption struct {
+	ID          int    `json:"id"`
+	KodeJurusan string `json:"kode_jurusan"`
+	NamaJurusan string `json:"nama_jurusan"`
+}
+
+type DashboardStats struct {
+	TotalSiswa         int `json:"total_siswa"`
+	TotalGuru          int `json:"total_guru"`
+	TotalKelas         int `json:"total_kelas"`
+	TotalJurusan       int `json:"total_jurusan"`
+	TotalMataPelajaran int `json:"total_mata_pelajaran"`
+}
