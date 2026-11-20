@@ -36,6 +36,8 @@ func HandleJurusan(w http.ResponseWriter, r *http.Request) {
 	case "GET":
 		if id == "" {
 			getJurusans(w, r)
+		} else {
+			getJurusanByID(w, id)
 		}
 	case "POST":
 		createJurusan(w, r)
@@ -66,6 +68,19 @@ func getJurusans(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(items)
+}
+
+func getJurusanByID(w http.ResponseWriter, id string) {
+	var item Jurusan
+	err := config.DB.QueryRow("SELECT id, kode_jurusan, nama_jurusan, COALESCE(deskripsi,'') FROM jurusan WHERE id = ?", id).
+		Scan(&item.ID, &item.KodeJurusan, &item.NamaJurusan, &item.Deskripsi)
+	if err != nil {
+		http.Error(w, "Jurusan tidak ditemukan", http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(item)
 }
 
 func createJurusan(w http.ResponseWriter, r *http.Request) {
@@ -115,7 +130,6 @@ func deleteJurusan(w http.ResponseWriter, r *http.Request, id string) {
 	json.NewEncoder(w).Encode(map[string]string{"message": "Jurusan berhasil dihapus"})
 }
 
-// ListJurusan tetap ada agar tidak break kode lama jika ada referensi
 func ListJurusan(w http.ResponseWriter, r *http.Request) {
 	var _ sql.DB
 	getJurusans(w, r)

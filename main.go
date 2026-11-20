@@ -18,8 +18,8 @@ func withCORS(next http.Handler) http.Handler {
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 
-		if r.Method == http.MethodOptions {
-			w.WriteHeader(http.StatusNoContent)
+		if r.Method == "OPTIONS" {
+			w.WriteHeader(http.StatusOK)
 			return
 		}
 
@@ -28,20 +28,23 @@ func withCORS(next http.Handler) http.Handler {
 }
 
 func main() {
-	// Load file .env
+	// 1. Memuat konfigurasi dari file .env
 	err := godotenv.Load()
 	if err != nil {
-		log.Println("Peringatan: File .env tidak ditemukan, menggunakan variabel sistem")
+		log.Println("Peringatan: File .env tidak ditemukan, menggunakan variabel sistem.")
 	}
 
-	// Inisialisasi Koneksi Database
+	// 2. Menghubungkan ke Database MySQL
 	config.ConnectDB()
 
-	// Mendaftarkan Endpoint (Route) API
+	// 3. Routing Endpoint API
 	http.HandleFunc("/api/login", controllers.Login)
+	http.HandleFunc("/api/dashboard", controllers.GetDashboardStats)
+	http.HandleFunc("/api/dashboard/", controllers.GetDashboardStats)
 	http.HandleFunc("/api/dashboard/stats", controllers.GetDashboardStats)
+	http.HandleFunc("/api/admin/dashboard", controllers.GetDashboardStats)
+	http.HandleFunc("/api/admin/dashboard/", controllers.GetDashboardStats)
 
-	// Routing untuk CRUD yang digenerate
 	http.HandleFunc("/api/jurusan", controllers.HandleJurusan)
 	http.HandleFunc("/api/jurusan/", controllers.HandleJurusan)
 
@@ -57,10 +60,43 @@ func main() {
 	http.HandleFunc("/api/kepala-sekolah", controllers.HandleKepalaSekolah)
 	http.HandleFunc("/api/kepala-sekolah/", controllers.HandleKepalaSekolah)
 
+	// Routing Portal Kepala Sekolah (Pimpinan Eksekutif - Read-Only)
+	http.HandleFunc("/api/kepala-sekolah-portal/dashboard", controllers.HandleKepalaSekolahPortal)
+	http.HandleFunc("/api/kepala-sekolah-portal/laporan", controllers.HandleKepalaSekolahPortal)
+	http.HandleFunc("/api/kepala-sekolah-portal/profil", controllers.HandleKepalaSekolahPortal)
+	http.HandleFunc("/api/kepala-sekolah-portal/", controllers.HandleKepalaSekolahPortal)
+
+	// Routing Kurikulum Portal (Monitoring & Manajemen Akademik)
+	http.HandleFunc("/api/kurikulum/dashboard", controllers.HandleKurikulumPortal)
+	http.HandleFunc("/api/kurikulum/akademik", controllers.HandleKurikulumPortal)
+	http.HandleFunc("/api/kurikulum/akademik/", controllers.HandleKurikulumPortal)
+	http.HandleFunc("/api/kurikulum/pengampu", controllers.HandleKurikulumPortal)
+	http.HandleFunc("/api/kurikulum/pengampu/", controllers.HandleKurikulumPortal)
+	http.HandleFunc("/api/kurikulum/monitoring", controllers.HandleKurikulumPortal)
+	http.HandleFunc("/api/kurikulum/monitoring/", controllers.HandleKurikulumPortal)
+	http.HandleFunc("/api/kurikulum/nilai", controllers.HandleKurikulumPortal)
+	http.HandleFunc("/api/kurikulum/options", controllers.HandleKurikulumPortal)
+
+	// CRUD Kurikulum oleh Admin
 	http.HandleFunc("/api/kurikulum", controllers.HandleKurikulum)
 	http.HandleFunc("/api/kurikulum/", controllers.HandleKurikulum)
 
-	// Routing Siswa Custom (yang sudah ada sebelumnya)
+	// Routing Khusus Role Guru (Pembelajaran & Penilaian)
+	http.HandleFunc("/api/guru/dashboard", controllers.HandleGuruDashboard)
+	http.HandleFunc("/api/guru/materi", controllers.HandleGuruMateri)
+	http.HandleFunc("/api/guru/materi/", controllers.HandleGuruMateri)
+	http.HandleFunc("/api/guru/tugas", controllers.HandleGuruTugas)
+	http.HandleFunc("/api/guru/tugas/", controllers.HandleGuruTugas)
+	http.HandleFunc("/api/guru/kuis-ujian", controllers.HandleGuruKuisUjian)
+	http.HandleFunc("/api/guru/kuis-ujian/", controllers.HandleGuruKuisUjian)
+	// Endpoint terpisah agar UI dan izin Kuis/Ujian tidak tercampur.
+	http.HandleFunc("/api/guru/kuis", controllers.HandleGuruKuisUjian)
+	http.HandleFunc("/api/guru/kuis/", controllers.HandleGuruKuisUjian)
+	http.HandleFunc("/api/guru/ujian", controllers.HandleGuruKuisUjian)
+	http.HandleFunc("/api/guru/ujian/", controllers.HandleGuruKuisUjian)
+	http.HandleFunc("/api/guru/nilai", controllers.HandleGuruNilai)
+
+	// Routing Siswa Custom
 	http.HandleFunc("/api/siswa", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost || r.Method == http.MethodOptions {
 			controllers.CreateSiswa(w, r)
@@ -69,6 +105,20 @@ func main() {
 		controllers.ListSiswa(w, r)
 	})
 	http.HandleFunc("/api/siswa/", controllers.StudentByID)
+	// Portal pembelajaran siswa dipisahkan dari CRUD siswa milik Admin.
+	http.HandleFunc("/api/siswa/dashboard", controllers.HandleSiswaPortal)
+	http.HandleFunc("/api/siswa/materi", controllers.HandleSiswaPortal)
+	http.HandleFunc("/api/siswa/materi/", controllers.HandleSiswaPortal)
+	http.HandleFunc("/api/siswa/tugas", controllers.HandleSiswaPortal)
+	http.HandleFunc("/api/siswa/tugas/", controllers.HandleSiswaPortal)
+	http.HandleFunc("/api/siswa/riwayat-tugas", controllers.HandleSiswaPortal)
+	http.HandleFunc("/api/siswa/quiz", controllers.HandleSiswaPortal)
+	http.HandleFunc("/api/siswa/quiz/", controllers.HandleSiswaPortal)
+	http.HandleFunc("/api/siswa/ujian", controllers.HandleSiswaPortal)
+	http.HandleFunc("/api/siswa/ujian/", controllers.HandleSiswaPortal)
+	http.HandleFunc("/api/siswa/profil", controllers.HandleSiswaPortal)
+	http.HandleFunc("/api/siswa/jadwal", controllers.HandleSiswaPortal)
+	http.HandleFunc("/api/siswa/notifikasi", controllers.HandleSiswaPortal)
 
 	// Route root untuk testing
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {

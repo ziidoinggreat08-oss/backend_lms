@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"backend_lms/config"
+	"golang.org/x/crypto/bcrypt"
 )
 
 type Guru struct {
@@ -17,9 +18,20 @@ type Guru struct {
 	NoTelepon    string `json:"no_telepon"`
 	Alamat       string `json:"alamat"`
 	Status       string `json:"status"`
-	// dari tabel users
-	Email    string `json:"email"`
-	Username string `json:"username"`
+	Email        string `json:"email"`
+	Username     string `json:"username"`
+}
+
+type GuruInput struct {
+	NIP          string `json:"nip"`
+	NamaLengkap  string `json:"nama_lengkap"`
+	JenisKelamin string `json:"jenis_kelamin"`
+	NoTelepon    string `json:"no_telepon"`
+	Alamat       string `json:"alamat"`
+	Status       string `json:"status"`
+	Email        string `json:"email"`
+	Username     string `json:"username"`
+	Password     string `json:"password"`
 }
 
 func HandleGuru(w http.ResponseWriter, r *http.Request) {
@@ -42,6 +54,8 @@ func HandleGuru(w http.ResponseWriter, r *http.Request) {
 	case "GET":
 		if id == "" {
 			getGurus(w, r)
+		} else {
+			getGuruByID(w, id)
 		}
 	case "POST":
 		createGuru(w, r)
@@ -82,16 +96,25 @@ func getGurus(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(items)
 }
 
-type GuruInput struct {
-	NIP          string `json:"nip"`
-	NamaLengkap  string `json:"nama_lengkap"`
-	JenisKelamin string `json:"jenis_kelamin"`
-	NoTelepon    string `json:"no_telepon"`
-	Alamat       string `json:"alamat"`
-	Status       string `json:"status"`
-	Email        string `json:"email"`
-	Username     string `json:"username"`
-	Password     string `json:"password"`
+func getGuruByID(w http.ResponseWriter, id string) {
+	var item Guru
+	err := config.DB.QueryRow(`
+		SELECT g.id, g.user_id, COALESCE(g.nip,''), g.nama_lengkap, g.jenis_kelamin,
+		       COALESCE(g.no_telepon,''), COALESCE(g.alamat,''), COALESCE(g.status,'aktif'),
+		       COALESCE(u.email,''), COALESCE(u.username,'')
+		FROM guru g
+		LEFT JOIN users u ON u.id = g.user_id
+		WHERE g.id = ?
+	`, id).Scan(&item.ID, &item.UserID, &item.NIP, &item.NamaLengkap, &item.JenisKelamin,
+		&item.NoTelepon, &item.Alamat, &item.Status, &item.Email, &item.Username)
+
+	if err != nil {
+		http.Error(w, "Guru tidak ditemukan", http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(item)
 }
 
 func createGuru(w http.ResponseWriter, r *http.Request) {
@@ -101,26 +124,54 @@ func createGuru(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if strings.TrimSpace(item.NamaLengkap) == "" || strings.TrimSpace(item.Username) == "" || strings.TrimSpace(item.Email) == "" {
+		http.Error(w, "Nama lengkap, username, dan email wajib diisi", http.StatusBadRequest)
+		return
+	}
+
+	pwd := strings.TrimSpace(item.Password)
+	if pwd == "" {
+		pwd = "guru123" // default password jika kosong
+	}
+
+	hash, err := bcrypt.GenerateFromPassword([]byte(pwd), bcrypt.DefaultCost)
+	if err != nil {
+		http.Error(w, "Gagal mengenkripsi password", http.StatusInternalServerError)
+		return
+	}
+
 	if item.Status == "" {
 		item.Status = "aktif"
 	}
+	if item.JenisKelamin == "" {
+		item.JenisKelamin = "L"
+	}
 
-	// Buat user account terlebih dahulu
-	res, err := config.DB.Exec("INSERT INTO users (username, email, password, role) VALUES (?, ?, 'dummy_password', 'guru')",
-		item.Username, item.Email)
+	tx, err := config.DB.Begin()
 	if err != nil {
-		http.Error(w, "Gagal membuat akun: "+err.Error(), http.StatusInternalServerError)
+		http.Error(w, "Gagal memulai transaksi: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer tx.Rollback()
+
+	res, err := tx.Exec("INSERT INTO users (username, email, password, role) VALUES (?, ?, ?, 'guru')",
+		item.Username, item.Email, string(hash))
+	if err != nil {
+		http.Error(w, "Username atau email sudah terdaftar: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 
 	userID, _ := res.LastInsertId()
 
-	_, err = config.DB.Exec("INSERT INTO guru (user_id, nip, nama_lengkap, jenis_kelamin, no_telepon, alamat, status) VALUES (?, ?, ?, ?, ?, ?, ?)",
+	_, err = tx.Exec("INSERT INTO guru (user_id, nip, nama_lengkap, jenis_kelamin, no_telepon, alamat, status) VALUES (?, NULLIF(?, ''), ?, ?, NULLIF(?, ''), NULLIF(?, ''), ?)",
 		userID, item.NIP, item.NamaLengkap, item.JenisKelamin, item.NoTelepon, item.Alamat, item.Status)
 	if err != nil {
-		// Rollback user jika insert guru gagal
-		config.DB.Exec("DELETE FROM users WHERE id=?", userID)
-		http.Error(w, "Gagal menyimpan data guru: "+err.Error(), http.StatusInternalServerError)
+		http.Error(w, "Gagal menyimpan profil guru: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	if err := tx.Commit(); err != nil {
+		http.Error(w, "Gagal menyimpan data: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
@@ -135,35 +186,69 @@ func updateGuru(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 
+	var userID int
+	err := config.DB.QueryRow("SELECT user_id FROM guru WHERE id = ?", id).Scan(&userID)
+	if err != nil {
+		http.Error(w, "Guru tidak ditemukan", http.StatusNotFound)
+		return
+	}
+
+	tx, err := config.DB.Begin()
+	if err != nil {
+		http.Error(w, "Gagal memulai transaksi", http.StatusInternalServerError)
+		return
+	}
+	defer tx.Rollback()
+
 	// Update profil guru
-	_, err := config.DB.Exec("UPDATE guru SET nip=?, nama_lengkap=?, jenis_kelamin=?, no_telepon=?, alamat=?, status=? WHERE id=?",
+	_, err = tx.Exec("UPDATE guru SET nip=NULLIF(?, ''), nama_lengkap=?, jenis_kelamin=?, no_telepon=NULLIF(?, ''), alamat=NULLIF(?, ''), status=? WHERE id=?",
 		item.NIP, item.NamaLengkap, item.JenisKelamin, item.NoTelepon, item.Alamat, item.Status, id)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	// Update email & username di tabel users juga
-	config.DB.Exec("UPDATE users u JOIN guru g ON u.id=g.user_id SET u.email=?, u.username=? WHERE g.id=?",
-		item.Email, item.Username, id)
+	// Update user info
+	_, err = tx.Exec("UPDATE users SET email=?, username=? WHERE id=?", item.Email, item.Username, userID)
+	if err != nil {
+		http.Error(w, "Username atau email sudah digunakan: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// Jika password diisi, update password
+	if strings.TrimSpace(item.Password) != "" {
+		if len(item.Password) < 6 {
+			http.Error(w, "Password minimal 6 karakter", http.StatusBadRequest)
+			return
+		}
+		hash, err := bcrypt.GenerateFromPassword([]byte(item.Password), bcrypt.DefaultCost)
+		if err == nil {
+			tx.Exec("UPDATE users SET password=? WHERE id=?", string(hash), userID)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		http.Error(w, "Gagal memperbarui data", http.StatusInternalServerError)
+		return
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"message": "Guru berhasil diubah"})
 }
 
 func deleteGuru(w http.ResponseWriter, r *http.Request, id string) {
-	// Ambil user_id dulu
 	var userID int
-	config.DB.QueryRow("SELECT user_id FROM guru WHERE id=?", id).Scan(&userID)
-
-	_, err := config.DB.Exec("DELETE FROM guru WHERE id=?", id)
+	err := config.DB.QueryRow("SELECT user_id FROM guru WHERE id=?", id).Scan(&userID)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, "Guru tidak ditemukan", http.StatusNotFound)
 		return
 	}
 
-	if userID > 0 {
-		config.DB.Exec("DELETE FROM users WHERE id=?", userID)
+	// Menghapus user akan cascade ke tabel guru (FOREIGN KEY ... ON DELETE CASCADE)
+	_, err = config.DB.Exec("DELETE FROM users WHERE id=?", userID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")

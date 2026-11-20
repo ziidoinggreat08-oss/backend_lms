@@ -48,8 +48,19 @@ func requireAdmin(w http.ResponseWriter, r *http.Request) bool {
 		}
 		return getJWTKey(), nil
 	})
-	if err != nil || !token.Valid || claims.Role != "admin" {
-		writeError(w, http.StatusForbidden, "Akses hanya untuk admin")
+	if err != nil || !token.Valid {
+		writeError(w, http.StatusUnauthorized, "Token kedaluwarsa atau tidak valid")
+		return false
+	}
+	if r.Method == http.MethodGet {
+		if claims.Role != "admin" && claims.Role != "kepala_sekolah" && claims.Role != "kurikulum" {
+			writeError(w, http.StatusForbidden, "Akses data siswa tidak diizinkan")
+			return false
+		}
+		return true
+	}
+	if claims.Role != "admin" {
+		writeError(w, http.StatusForbidden, "Aksi perubahan hanya untuk admin")
 		return false
 	}
 	return true

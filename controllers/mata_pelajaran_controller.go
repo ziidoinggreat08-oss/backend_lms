@@ -36,6 +36,8 @@ func HandleMataPelajaran(w http.ResponseWriter, r *http.Request) {
 	case "GET":
 		if id == "" {
 			getMataPelajarans(w, r)
+		} else {
+			getMataPelajaranByID(w, id)
 		}
 	case "POST":
 		createMataPelajaran(w, r)
@@ -66,6 +68,19 @@ func getMataPelajarans(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(items)
+}
+
+func getMataPelajaranByID(w http.ResponseWriter, id string) {
+	var item MataPelajaran
+	err := config.DB.QueryRow("SELECT id, kode_mapel, nama_mapel, COALESCE(kelompok,''), COALESCE(deskripsi,'') FROM mata_pelajaran WHERE id = ?", id).
+		Scan(&item.ID, &item.KodeMapel, &item.NamaMapel, &item.Kelompok, &item.Deskripsi)
+	if err != nil {
+		http.Error(w, "Mata pelajaran tidak ditemukan", http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(item)
 }
 
 func createMataPelajaran(w http.ResponseWriter, r *http.Request) {

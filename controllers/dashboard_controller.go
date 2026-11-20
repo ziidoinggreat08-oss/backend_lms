@@ -8,11 +8,12 @@ import (
 )
 
 type DashboardStats struct {
-	TotalSiswa   int `json:"total_siswa"`
-	TotalGuru    int `json:"total_guru"`
-	TotalKelas   int `json:"total_kelas"`
-	TotalJurusan int `json:"total_jurusan"`
-	TotalMapel   int `json:"total_mapel"`
+	TotalSiswa         int `json:"total_siswa"`
+	TotalGuru          int `json:"total_guru"`
+	TotalKelas         int `json:"total_kelas"`
+	TotalJurusan       int `json:"total_jurusan"`
+	TotalMapel         int `json:"total_mapel"`
+	TotalMataPelajaran int `json:"total_mata_pelajaran"`
 }
 
 func GetDashboardStats(w http.ResponseWriter, r *http.Request) {
@@ -41,7 +42,10 @@ func GetDashboardStats(w http.ResponseWriter, r *http.Request) {
 	// Hitung total Jurusan
 	config.DB.QueryRow("SELECT COUNT(*) FROM jurusan").Scan(&stats.TotalJurusan)
 	// Hitung total Mata Pelajaran
-	config.DB.QueryRow("SELECT COUNT(*) FROM mata_pelajaran").Scan(&stats.TotalMapel)
+	var mapelCount int
+	config.DB.QueryRow("SELECT COUNT(*) FROM mata_pelajaran").Scan(&mapelCount)
+	stats.TotalMapel = mapelCount
+	stats.TotalMataPelajaran = mapelCount
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(stats)

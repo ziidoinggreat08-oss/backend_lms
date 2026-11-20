@@ -9,13 +9,14 @@ type User struct {
 	Role     string `json:"role"`
 }
 
-// LoginRequest merepresentasikan payload dari React saat proses login
+// LoginRequest merepresentasikan payload saat proses login (bisa menggunakan email atau username)
 type LoginRequest struct {
 	Email    string `json:"email"`
+	Username string `json:"username"`
 	Password string `json:"password"`
 }
 
-// LoginResponse merepresentasikan data JSON yang dikembalikan ke React
+// LoginResponse merepresentasikan data JSON yang dikembalikan ke frontend
 type LoginResponse struct {
 	Message string `json:"message"`
 	Token   string `json:"token"`
