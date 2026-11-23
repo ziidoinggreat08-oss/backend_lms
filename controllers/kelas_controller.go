@@ -1,6 +1,7 @@
 package controllers
 
 import (
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"strconv"
@@ -15,7 +16,12 @@ type Kelas struct {
 	Tingkat       string `json:"tingkat"`
 	JurusanID     int    `json:"jurusan_id"`
 	NamaJurusan   string `json:"nama_jurusan"`
+	KodeJurusan   string `json:"kode_jurusan"`
 	TahunAjaranID int    `json:"tahun_ajaran_id"`
+	TahunAjaran   string `json:"tahun_ajaran"`
+	WaliKelasID   *int   `json:"wali_kelas_id"`
+	WaliKelasNama string `json:"wali_kelas_nama"`
+	JumlahSiswa   int    `json:"jumlah_siswa"`
 }
 
 func HandleKelas(w http.ResponseWriter, r *http.Request) {
@@ -52,34 +58,45 @@ func HandleKelas(w http.ResponseWriter, r *http.Request) {
 
 func getKelas(w http.ResponseWriter, r *http.Request) {
 	jurusanIDQuery := r.URL.Query().Get("jurusan_id")
+	tingkatQuery := r.URL.Query().Get("tingkat")
 
-	var query string
+	baseQuery := `
+		SELECT k.id, k.nama_kelas, k.tingkat, k.jurusan_id, 
+		       COALESCE(j.nama_jurusan, ''), COALESCE(j.kode_jurusan, ''),
+		       k.tahun_ajaran_id,
+		       COALESCE(CONCAT(ta.tahun, ' - ', ta.semester), ''),
+		       k.wali_kelas_id,
+		       COALESCE(g.nama_lengkap, ''),
+		       COUNT(DISTINCT s.id) as jumlah_siswa
+		FROM kelas k
+		LEFT JOIN jurusan j ON j.id = k.jurusan_id
+		LEFT JOIN tahun_ajaran ta ON ta.id = k.tahun_ajaran_id
+		LEFT JOIN guru g ON g.id = k.wali_kelas_id
+		LEFT JOIN siswa s ON s.kelas_id = k.id AND s.status = 'aktif'
+	`
+
+	var conditions []string
 	var args []interface{}
 
 	if jurusanIDQuery != "" {
-		jurusanID, err := strconv.Atoi(jurusanIDQuery)
-		if err == nil && jurusanID > 0 {
-			query = `
-				SELECT k.id, k.nama_kelas, k.tingkat, k.jurusan_id, COALESCE(j.nama_jurusan,''), k.tahun_ajaran_id
-				FROM kelas k
-				LEFT JOIN jurusan j ON j.id = k.jurusan_id
-				WHERE k.jurusan_id = ?
-				ORDER BY k.tingkat, k.nama_kelas
-			`
-			args = append(args, jurusanID)
+		if jID, err := strconv.Atoi(jurusanIDQuery); err == nil && jID > 0 {
+			conditions = append(conditions, "k.jurusan_id = ?")
+			args = append(args, jID)
 		}
 	}
 
-	if query == "" {
-		query = `
-			SELECT k.id, k.nama_kelas, k.tingkat, k.jurusan_id, COALESCE(j.nama_jurusan,''), k.tahun_ajaran_id
-			FROM kelas k
-			LEFT JOIN jurusan j ON j.id = k.jurusan_id
-			ORDER BY k.tingkat, k.nama_kelas
-		`
+	if tingkatQuery != "" {
+		conditions = append(conditions, "k.tingkat = ?")
+		args = append(args, tingkatQuery)
 	}
 
-	rows, err := config.DB.Query(query, args...)
+	if len(conditions) > 0 {
+		baseQuery += " WHERE " + strings.Join(conditions, " AND ")
+	}
+
+	baseQuery += " GROUP BY k.id, k.nama_kelas, k.tingkat, k.jurusan_id, j.nama_jurusan, j.kode_jurusan, k.tahun_ajaran_id, ta.tahun, ta.semester, k.wali_kelas_id, g.nama_lengkap ORDER BY k.jurusan_id ASC, k.tingkat ASC, k.nama_kelas ASC"
+
+	rows, err := config.DB.Query(baseQuery, args...)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -89,9 +106,26 @@ func getKelas(w http.ResponseWriter, r *http.Request) {
 	items := []Kelas{}
 	for rows.Next() {
 		var item Kelas
-		if err := rows.Scan(&item.ID, &item.NamaKelas, &item.Tingkat, &item.JurusanID, &item.NamaJurusan, &item.TahunAjaranID); err != nil {
+		var waliKelasID sql.NullInt64
+		if err := rows.Scan(
+			&item.ID,
+			&item.NamaKelas,
+			&item.Tingkat,
+			&item.JurusanID,
+			&item.NamaJurusan,
+			&item.KodeJurusan,
+			&item.TahunAjaranID,
+			&item.TahunAjaran,
+			&waliKelasID,
+			&item.WaliKelasNama,
+			&item.JumlahSiswa,
+		); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
+		}
+		if waliKelasID.Valid {
+			idVal := int(waliKelasID.Int64)
+			item.WaliKelasID = &idVal
 		}
 		items = append(items, item)
 	}
@@ -102,16 +136,44 @@ func getKelas(w http.ResponseWriter, r *http.Request) {
 
 func getKelasByID(w http.ResponseWriter, id string) {
 	var item Kelas
+	var waliKelasID sql.NullInt64
 	err := config.DB.QueryRow(`
-		SELECT k.id, k.nama_kelas, k.tingkat, k.jurusan_id, COALESCE(j.nama_jurusan,''), k.tahun_ajaran_id
+		SELECT k.id, k.nama_kelas, k.tingkat, k.jurusan_id, 
+		       COALESCE(j.nama_jurusan, ''), COALESCE(j.kode_jurusan, ''),
+		       k.tahun_ajaran_id,
+		       COALESCE(CONCAT(ta.tahun, ' - ', ta.semester), ''),
+		       k.wali_kelas_id,
+		       COALESCE(g.nama_lengkap, ''),
+		       COUNT(DISTINCT s.id) as jumlah_siswa
 		FROM kelas k
 		LEFT JOIN jurusan j ON j.id = k.jurusan_id
+		LEFT JOIN tahun_ajaran ta ON ta.id = k.tahun_ajaran_id
+		LEFT JOIN guru g ON g.id = k.wali_kelas_id
+		LEFT JOIN siswa s ON s.kelas_id = k.id AND s.status = 'aktif'
 		WHERE k.id = ?
-	`, id).Scan(&item.ID, &item.NamaKelas, &item.Tingkat, &item.JurusanID, &item.NamaJurusan, &item.TahunAjaranID)
+		GROUP BY k.id, k.nama_kelas, k.tingkat, k.jurusan_id, j.nama_jurusan, j.kode_jurusan, k.tahun_ajaran_id, ta.tahun, ta.semester, k.wali_kelas_id, g.nama_lengkap
+	`, id).Scan(
+		&item.ID,
+		&item.NamaKelas,
+		&item.Tingkat,
+		&item.JurusanID,
+		&item.NamaJurusan,
+		&item.KodeJurusan,
+		&item.TahunAjaranID,
+		&item.TahunAjaran,
+		&waliKelasID,
+		&item.WaliKelasNama,
+		&item.JumlahSiswa,
+	)
 
 	if err != nil {
 		http.Error(w, "Kelas tidak ditemukan", http.StatusNotFound)
 		return
+	}
+
+	if waliKelasID.Valid {
+		idVal := int(waliKelasID.Int64)
+		item.WaliKelasID = &idVal
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -119,7 +181,13 @@ func getKelasByID(w http.ResponseWriter, id string) {
 }
 
 func createKelas(w http.ResponseWriter, r *http.Request) {
-	var item Kelas
+	var item struct {
+		NamaKelas     string `json:"nama_kelas"`
+		Tingkat       string `json:"tingkat"`
+		JurusanID     int    `json:"jurusan_id"`
+		TahunAjaranID int    `json:"tahun_ajaran_id"`
+		WaliKelasID   *int   `json:"wali_kelas_id"`
+	}
 	if err := json.NewDecoder(r.Body).Decode(&item); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -129,8 +197,15 @@ func createKelas(w http.ResponseWriter, r *http.Request) {
 		item.TahunAjaranID = 1
 	}
 
-	_, err := config.DB.Exec("INSERT INTO kelas (nama_kelas, tingkat, jurusan_id, tahun_ajaran_id) VALUES (?, ?, ?, ?)",
-		item.NamaKelas, item.Tingkat, item.JurusanID, item.TahunAjaranID)
+	var err error
+	if item.WaliKelasID != nil && *item.WaliKelasID > 0 {
+		_, err = config.DB.Exec("INSERT INTO kelas (nama_kelas, tingkat, jurusan_id, tahun_ajaran_id, wali_kelas_id) VALUES (?, ?, ?, ?, ?)",
+			item.NamaKelas, item.Tingkat, item.JurusanID, item.TahunAjaranID, *item.WaliKelasID)
+	} else {
+		_, err = config.DB.Exec("INSERT INTO kelas (nama_kelas, tingkat, jurusan_id, tahun_ajaran_id) VALUES (?, ?, ?, ?)",
+			item.NamaKelas, item.Tingkat, item.JurusanID, item.TahunAjaranID)
+	}
+
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -141,7 +216,13 @@ func createKelas(w http.ResponseWriter, r *http.Request) {
 }
 
 func updateKelas(w http.ResponseWriter, r *http.Request, id string) {
-	var item Kelas
+	var item struct {
+		NamaKelas     string `json:"nama_kelas"`
+		Tingkat       string `json:"tingkat"`
+		JurusanID     int    `json:"jurusan_id"`
+		TahunAjaranID int    `json:"tahun_ajaran_id"`
+		WaliKelasID   *int   `json:"wali_kelas_id"`
+	}
 	if err := json.NewDecoder(r.Body).Decode(&item); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -151,8 +232,15 @@ func updateKelas(w http.ResponseWriter, r *http.Request, id string) {
 		item.TahunAjaranID = 1
 	}
 
-	_, err := config.DB.Exec("UPDATE kelas SET nama_kelas=?, tingkat=?, jurusan_id=?, tahun_ajaran_id=? WHERE id=?",
-		item.NamaKelas, item.Tingkat, item.JurusanID, item.TahunAjaranID, id)
+	var err error
+	if item.WaliKelasID != nil && *item.WaliKelasID > 0 {
+		_, err = config.DB.Exec("UPDATE kelas SET nama_kelas=?, tingkat=?, jurusan_id=?, tahun_ajaran_id=?, wali_kelas_id=? WHERE id=?",
+			item.NamaKelas, item.Tingkat, item.JurusanID, item.TahunAjaranID, *item.WaliKelasID, id)
+	} else {
+		_, err = config.DB.Exec("UPDATE kelas SET nama_kelas=?, tingkat=?, jurusan_id=?, tahun_ajaran_id=?, wali_kelas_id=NULL WHERE id=?",
+			item.NamaKelas, item.Tingkat, item.JurusanID, item.TahunAjaranID, id)
+	}
+
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -163,6 +251,13 @@ func updateKelas(w http.ResponseWriter, r *http.Request, id string) {
 }
 
 func deleteKelas(w http.ResponseWriter, r *http.Request, id string) {
+	var count int
+	_ = config.DB.QueryRow("SELECT COUNT(*) FROM siswa WHERE kelas_id = ?", id).Scan(&count)
+	if count > 0 {
+		http.Error(w, "Tidak dapat menghapus kelas karena masih memiliki siswa terdaftar", http.StatusBadRequest)
+		return
+	}
+
 	_, err := config.DB.Exec("DELETE FROM kelas WHERE id=?", id)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
