@@ -83,6 +83,7 @@ func main() {
 
 	// Routing Khusus Role Guru (Pembelajaran & Penilaian)
 	http.HandleFunc("/api/guru/dashboard", controllers.HandleGuruDashboard)
+	http.HandleFunc("/api/guru/mata-pelajaran", controllers.HandleGuruMataPelajaran)
 	http.HandleFunc("/api/guru/materi", controllers.HandleGuruMateri)
 	http.HandleFunc("/api/guru/materi/", controllers.HandleGuruMateri)
 	http.HandleFunc("/api/guru/tugas", controllers.HandleGuruTugas)

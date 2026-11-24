@@ -13,11 +13,29 @@ var DB *sql.DB
 
 func ConnectDB() {
 	host := os.Getenv("DB_HOST")
+	if host == "" {
+		host = "127.0.0.1"
+	}
 	port := os.Getenv("DB_PORT")
+	if port == "" {
+		port = "3306"
+	}
 	user := os.Getenv("DB_USER")
+	if user == "" {
+		user = "root"
+	}
 	password := os.Getenv("DB_PASSWORD")
 	name := os.Getenv("DB_NAME")
+	if name == "" {
+		name = "db_lms"
+	}
 
+	// 1. Pastikan database MySQL sudah dibuat sebelum membuka koneksi ke DB_NAME (mencegah error "Unknown database")
+	if err := EnsureDatabaseExists(host, port, user, password, name); err != nil {
+		log.Printf("[Peringatan] %v", err)
+	}
+
+	// 2. Hubungkan ke database target
 	// DSN (Data Source Name): username:password@protocol(address)/dbname
 	dsn := fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?parseTime=true", user, password, host, port, name)
 
@@ -28,36 +46,14 @@ func ConnectDB() {
 
 	// Tes Ping untuk memastikan koneksi ke database berhasil
 	if err = db.Ping(); err != nil {
-		log.Fatalf("Gagal terhubung ke MySQL (Pastikan Laragon berjalan): %v", err)
+		log.Fatalf("Gagal terhubung ke MySQL (Pastikan MySQL berjalan di %s:%s): %v", host, port, err)
 	}
 
 	DB = db
 	fmt.Printf("Koneksi ke database '%s' berhasil!\n", name)
 
-	// Pastikan akun default untuk role kurikulum dan kepala_sekolah selalu siap
-	ensureDefaultUsers(db)
-}
-
-func ensureDefaultUsers(db *sql.DB) {
-	// 1. Pastikan user Kurikulum ada
-	var kCount int
-	_ = db.QueryRow("SELECT COUNT(*) FROM users WHERE username = 'kurikulum'").Scan(&kCount)
-	if kCount == 0 {
-		res, err := db.Exec("INSERT INTO users (username, email, password, role) VALUES ('kurikulum', 'kurikulum@educlass.com', '$2a$10$NIVpMEXSSvfHUTBlYaXt1uQgv63sZhIWH9M6MnbX0nvQPKRXVPDlm', 'kurikulum')")
-		if err == nil {
-			uid, _ := res.LastInsertId()
-			_, _ = db.Exec("INSERT INTO kurikulum (user_id, nip, nama_lengkap, no_telepon) VALUES (?, '197505102000032001', 'Dra. Hj. Siti Aminah, M.Pd.', '081234567800')", uid)
-		}
-	}
-
-	// 2. Pastikan user Kepala Sekolah ada
-	var ksCount int
-	_ = db.QueryRow("SELECT COUNT(*) FROM users WHERE username IN ('kepala_sekolah', 'kepsek')").Scan(&ksCount)
-	if ksCount == 0 {
-		res, err := db.Exec("INSERT INTO users (username, email, password, role) VALUES ('kepala_sekolah', 'kepala.sekolah@educlass.com', '$2a$10$NIVpMEXSSvfHUTBlYaXt1uQgv63sZhIWH9M6MnbX0nvQPKRXVPDlm', 'kepala_sekolah')")
-		if err == nil {
-			uid, _ := res.LastInsertId()
-			_, _ = db.Exec("INSERT INTO kepala_sekolah (user_id, nip, nama_lengkap, no_telepon) VALUES (?, '196803121995121001', 'Drs. H. Mulyadi, M.M.', '081234567899')", uid)
-		}
+	// 3. Jalankan Auto-Migration (idempotent, skema dan seed otomatis, tidak ada duplikasi tabel/data)
+	if err := RunAutoMigrations(db); err != nil {
+		log.Fatalf("Gagal menjalankan auto-migration: %v", err)
 	}
 }

@@ -10,28 +10,31 @@ import (
 )
 
 type Guru struct {
-	ID           int    `json:"id"`
-	UserID       int    `json:"user_id"`
-	NIP          string `json:"nip"`
-	NamaLengkap  string `json:"nama_lengkap"`
-	JenisKelamin string `json:"jenis_kelamin"`
-	NoTelepon    string `json:"no_telepon"`
-	Alamat       string `json:"alamat"`
-	Status       string `json:"status"`
-	Email        string `json:"email"`
-	Username     string `json:"username"`
+	ID               int      `json:"id"`
+	UserID           int      `json:"user_id"`
+	NIP              string   `json:"nip"`
+	NamaLengkap      string   `json:"nama_lengkap"`
+	JenisKelamin     string   `json:"jenis_kelamin"`
+	NoTelepon        string   `json:"no_telepon"`
+	Alamat           string   `json:"alamat"`
+	Status           string   `json:"status"`
+	Email            string   `json:"email"`
+	Username         string   `json:"username"`
+	MataPelajaranIDs []int    `json:"mata_pelajaran_ids"`
+	MataPelajaran    []string `json:"mata_pelajaran"`
 }
 
 type GuruInput struct {
-	NIP          string `json:"nip"`
-	NamaLengkap  string `json:"nama_lengkap"`
-	JenisKelamin string `json:"jenis_kelamin"`
-	NoTelepon    string `json:"no_telepon"`
-	Alamat       string `json:"alamat"`
-	Status       string `json:"status"`
-	Email        string `json:"email"`
-	Username     string `json:"username"`
-	Password     string `json:"password"`
+	NIP              string `json:"nip"`
+	NamaLengkap      string `json:"nama_lengkap"`
+	JenisKelamin     string `json:"jenis_kelamin"`
+	NoTelepon        string `json:"no_telepon"`
+	Alamat           string `json:"alamat"`
+	Status           string `json:"status"`
+	Email            string `json:"email"`
+	Username         string `json:"username"`
+	Password         string `json:"password"`
+	MataPelajaranIDs []int  `json:"mata_pelajaran_ids"`
 }
 
 func HandleGuru(w http.ResponseWriter, r *http.Request) {
@@ -81,6 +84,28 @@ func getGurus(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
+	// Map relasi mata pelajaran diampu
+	mpMapIDs := make(map[int][]int)
+	mpMapNames := make(map[int][]string)
+
+	mpRows, err := config.DB.Query(`
+		SELECT gmp.guru_id, mp.id, mp.nama_mapel
+		FROM guru_mata_pelajaran gmp
+		JOIN mata_pelajaran mp ON mp.id = gmp.mata_pelajaran_id
+		ORDER BY mp.nama_mapel
+	`)
+	if err == nil {
+		defer mpRows.Close()
+		for mpRows.Next() {
+			var gid, mpid int
+			var mName string
+			if err := mpRows.Scan(&gid, &mpid, &mName); err == nil {
+				mpMapIDs[gid] = append(mpMapIDs[gid], mpid)
+				mpMapNames[gid] = append(mpMapNames[gid], mName)
+			}
+		}
+	}
+
 	items := []Guru{}
 	for rows.Next() {
 		var item Guru
@@ -89,6 +114,16 @@ func getGurus(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+
+		item.MataPelajaranIDs = mpMapIDs[item.ID]
+		if item.MataPelajaranIDs == nil {
+			item.MataPelajaranIDs = []int{}
+		}
+		item.MataPelajaran = mpMapNames[item.ID]
+		if item.MataPelajaran == nil {
+			item.MataPelajaran = []string{}
+		}
+
 		items = append(items, item)
 	}
 
@@ -113,6 +148,28 @@ func getGuruByID(w http.ResponseWriter, id string) {
 		return
 	}
 
+	item.MataPelajaranIDs = []int{}
+	item.MataPelajaran = []string{}
+
+	mpRows, err := config.DB.Query(`
+		SELECT mp.id, mp.nama_mapel
+		FROM guru_mata_pelajaran gmp
+		JOIN mata_pelajaran mp ON mp.id = gmp.mata_pelajaran_id
+		WHERE gmp.guru_id = ?
+		ORDER BY mp.nama_mapel
+	`, id)
+	if err == nil {
+		defer mpRows.Close()
+		for mpRows.Next() {
+			var mpid int
+			var mName string
+			if err := mpRows.Scan(&mpid, &mName); err == nil {
+				item.MataPelajaranIDs = append(item.MataPelajaranIDs, mpid)
+				item.MataPelajaran = append(item.MataPelajaran, mName)
+			}
+		}
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(item)
 }
@@ -126,6 +183,11 @@ func createGuru(w http.ResponseWriter, r *http.Request) {
 
 	if strings.TrimSpace(item.NamaLengkap) == "" || strings.TrimSpace(item.Username) == "" || strings.TrimSpace(item.Email) == "" {
 		http.Error(w, "Nama lengkap, username, dan email wajib diisi", http.StatusBadRequest)
+		return
+	}
+
+	if len(item.MataPelajaranIDs) == 0 {
+		http.Error(w, "Minimal satu mata pelajaran yang diampu wajib dipilih", http.StatusBadRequest)
 		return
 	}
 
@@ -163,11 +225,24 @@ func createGuru(w http.ResponseWriter, r *http.Request) {
 
 	userID, _ := res.LastInsertId()
 
-	_, err = tx.Exec("INSERT INTO guru (user_id, nip, nama_lengkap, jenis_kelamin, no_telepon, alamat, status) VALUES (?, NULLIF(?, ''), ?, ?, NULLIF(?, ''), NULLIF(?, ''), ?)",
+	resGuru, err := tx.Exec("INSERT INTO guru (user_id, nip, nama_lengkap, jenis_kelamin, no_telepon, alamat, status) VALUES (?, NULLIF(?, ''), ?, ?, NULLIF(?, ''), NULLIF(?, ''), ?)",
 		userID, item.NIP, item.NamaLengkap, item.JenisKelamin, item.NoTelepon, item.Alamat, item.Status)
 	if err != nil {
 		http.Error(w, "Gagal menyimpan profil guru: "+err.Error(), http.StatusInternalServerError)
 		return
+	}
+
+	guruID, _ := resGuru.LastInsertId()
+
+	// Simpan relasi mata pelajaran diampu
+	for _, mpID := range item.MataPelajaranIDs {
+		if mpID > 0 {
+			_, err = tx.Exec("INSERT IGNORE INTO guru_mata_pelajaran (guru_id, mata_pelajaran_id) VALUES (?, ?)", guruID, mpID)
+			if err != nil {
+				http.Error(w, "Gagal mengaitkan mata pelajaran: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+		}
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -183,6 +258,16 @@ func updateGuru(w http.ResponseWriter, r *http.Request, id string) {
 	var item GuruInput
 	if err := json.NewDecoder(r.Body).Decode(&item); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if strings.TrimSpace(item.NamaLengkap) == "" || strings.TrimSpace(item.Username) == "" || strings.TrimSpace(item.Email) == "" {
+		http.Error(w, "Nama lengkap, username, dan email wajib diisi", http.StatusBadRequest)
+		return
+	}
+
+	if len(item.MataPelajaranIDs) == 0 {
+		http.Error(w, "Minimal satu mata pelajaran yang diampu wajib dipilih", http.StatusBadRequest)
 		return
 	}
 
@@ -227,6 +312,23 @@ func updateGuru(w http.ResponseWriter, r *http.Request, id string) {
 		}
 	}
 
+	// Sinkronisasi mata pelajaran diampu
+	_, err = tx.Exec("DELETE FROM guru_mata_pelajaran WHERE guru_id = ?", id)
+	if err != nil {
+		http.Error(w, "Gagal memperbarui relasi mata pelajaran: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	for _, mpID := range item.MataPelajaranIDs {
+		if mpID > 0 {
+			_, err = tx.Exec("INSERT IGNORE INTO guru_mata_pelajaran (guru_id, mata_pelajaran_id) VALUES (?, ?)", id, mpID)
+			if err != nil {
+				http.Error(w, "Gagal menyimpan relasi mata pelajaran: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+		}
+	}
+
 	if err := tx.Commit(); err != nil {
 		http.Error(w, "Gagal memperbarui data", http.StatusInternalServerError)
 		return
@@ -244,7 +346,7 @@ func deleteGuru(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 
-	// Menghapus user akan cascade ke tabel guru (FOREIGN KEY ... ON DELETE CASCADE)
+	// Menghapus user akan cascade ke tabel guru dan tabel guru_mata_pelajaran (FOREIGN KEY ... ON DELETE CASCADE)
 	_, err = config.DB.Exec("DELETE FROM users WHERE id=?", userID)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)

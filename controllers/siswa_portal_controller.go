@@ -290,7 +290,33 @@ func siswaProfil(w http.ResponseWriter, r *http.Request, siswaID, userID int) {
 }
 
 func daftarTugas(w http.ResponseWriter, siswaID, kelasID int) {
-	rows, err := config.DB.Query(`SELECT t.id,t.judul,t.deskripsi,mp.nama_mapel,g.nama_lengkap,DATE_FORMAT(t.created_at,'%Y-%m-%d %H:%i'),DATE_FORMAT(t.deadline,'%Y-%m-%d %H:%i'),COALESCE(DATE_FORMAT(p.waktu_kumpul,'%Y-%m-%d %H:%i'),''),CASE WHEN p.id IS NULL AND t.deadline<NOW() THEN 'terlambat' WHEN p.id IS NULL THEN 'belum_dikerjakan' WHEN p.waktu_kumpul>t.deadline THEN 'terlambat' ELSE 'sudah_dikumpulkan' END FROM tugas t JOIN mata_pelajaran mp ON mp.id=t.mata_pelajaran_id JOIN guru g ON g.id=t.guru_id LEFT JOIN pengumpulan_tugas p ON p.tugas_id=t.id AND p.siswa_id=? WHERE t.kelas_id=? ORDER BY t.deadline DESC`, siswaID, kelasID)
+	rows, err := config.DB.Query(`SELECT 
+		t.id,
+		t.judul,
+		COALESCE(t.deskripsi, ''),
+		mp.nama_mapel,
+		g.nama_lengkap,
+		DATE_FORMAT(t.created_at,'%Y-%m-%d %H:%i'),
+		DATE_FORMAT(t.deadline,'%Y-%m-%d %H:%i'),
+		COALESCE(DATE_FORMAT(p.waktu_kumpul,'%Y-%m-%d %H:%i'),''),
+		CASE 
+			WHEN p.id IS NULL AND t.deadline<NOW() THEN 'terlambat' 
+			WHEN p.id IS NULL THEN 'belum_dikerjakan' 
+			WHEN p.waktu_kumpul>t.deadline THEN 'terlambat' 
+			ELSE 'sudah_dikumpulkan' 
+		END,
+		COALESCE(t.file_lampiran, ''),
+		COALESCE(p.file_url, ''),
+		COALESCE(p.catatan_siswa, ''),
+		COALESCE(p.status, 'belum_dinilai'),
+		COALESCE(p.nilai, 0),
+		COALESCE(p.catatan_guru, '')
+	FROM tugas t 
+	JOIN mata_pelajaran mp ON mp.id=t.mata_pelajaran_id 
+	JOIN guru g ON g.id=t.guru_id 
+	LEFT JOIN pengumpulan_tugas p ON p.tugas_id=t.id AND p.siswa_id=? 
+	WHERE t.kelas_id=? 
+	ORDER BY t.deadline DESC`, siswaID, kelasID)
 	if err != nil {
 		writeError(w, 500, "Gagal memuat tugas")
 		return
@@ -299,9 +325,29 @@ func daftarTugas(w http.ResponseWriter, siswaID, kelasID int) {
 	out := []map[string]any{}
 	for rows.Next() {
 		var id int
-		var a, b, c, d, e, f, g, h string
-		rows.Scan(&id, &a, &b, &c, &d, &e, &f, &g, &h)
-		out = append(out, map[string]any{"id": id, "judul": a, "deskripsi": b, "mata_pelajaran": c, "guru": d, "tanggal_diberikan": e, "deadline": f, "waktu_kumpul": g, "status": h})
+		var judul, deskripsi, mapel, guru, tanggalDiberikan, deadline, waktuKumpul, status string
+		var fileLampiran, fileUrl, catatanSiswa, statusPenilaian, catatanGuru string
+		var nilai float64
+		if err := rows.Scan(&id, &judul, &deskripsi, &mapel, &guru, &tanggalDiberikan, &deadline, &waktuKumpul, &status, &fileLampiran, &fileUrl, &catatanSiswa, &statusPenilaian, &nilai, &catatanGuru); err != nil {
+			continue
+		}
+		out = append(out, map[string]any{
+			"id":                id,
+			"judul":             judul,
+			"deskripsi":         deskripsi,
+			"mata_pelajaran":    mapel,
+			"guru":              guru,
+			"tanggal_diberikan": tanggalDiberikan,
+			"deadline":          deadline,
+			"waktu_kumpul":      waktuKumpul,
+			"status":            status,
+			"file_lampiran":     fileLampiran,
+			"file_url":          fileUrl,
+			"catatan_siswa":     catatanSiswa,
+			"status_penilaian":  statusPenilaian,
+			"nilai":             nilai,
+			"catatan_guru":      catatanGuru,
+		})
 	}
 	json.NewEncoder(w).Encode(out)
 }
@@ -364,6 +410,8 @@ func unggahTugas(w http.ResponseWriter, r *http.Request, siswaID, kelasID int, i
 		return
 	}
 	url := "/uploads/tugas/" + strconv.Itoa(siswaID) + "/" + name
+	catatanSiswa := strings.TrimSpace(r.FormValue("catatan_siswa"))
+
 	tx, err := config.DB.Begin()
 	if err != nil {
 		writeError(w, 500, "Gagal menyimpan pengumpulan")
@@ -373,11 +421,11 @@ func unggahTugas(w http.ResponseWriter, r *http.Request, siswaID, kelasID int, i
 	var pengumpulanID int64
 	err = tx.QueryRow("SELECT id FROM pengumpulan_tugas WHERE tugas_id=? AND siswa_id=?", id, siswaID).Scan(&pengumpulanID)
 	if err == sql.ErrNoRows {
-		res, e := tx.Exec("INSERT INTO pengumpulan_tugas(tugas_id,siswa_id,file_url,status) VALUES(?,?,?,'belum_dinilai')", id, siswaID, url)
+		res, e := tx.Exec("INSERT INTO pengumpulan_tugas(tugas_id,siswa_id,file_url,catatan_siswa,status) VALUES(?,?,?,?,'belum_dinilai')", id, siswaID, url, catatanSiswa)
 		err = e
 		pengumpulanID, _ = res.LastInsertId()
 	} else if err == nil {
-		_, err = tx.Exec("UPDATE pengumpulan_tugas SET file_url=?,waktu_kumpul=NOW() WHERE id=?", url, pengumpulanID)
+		_, err = tx.Exec("UPDATE pengumpulan_tugas SET file_url=?,catatan_siswa=?,waktu_kumpul=NOW() WHERE id=?", url, catatanSiswa, pengumpulanID)
 	}
 	if err == nil {
 		_, err = tx.Exec("INSERT INTO riwayat_pengumpulan_tugas(pengumpulan_id,file_url) VALUES(?,?)", pengumpulanID, url)

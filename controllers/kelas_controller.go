@@ -193,6 +193,20 @@ func createKelas(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	item.NamaKelas = strings.TrimSpace(item.NamaKelas)
+	if item.NamaKelas == "" {
+		http.Error(w, "Nama kelas wajib diisi", http.StatusBadRequest)
+		return
+	}
+
+	// Cegah duplikasi nama kelas / nomor rombel
+	var exists int
+	errCheck := config.DB.QueryRow("SELECT COUNT(*) FROM kelas WHERE LOWER(TRIM(nama_kelas)) = LOWER(?)", item.NamaKelas).Scan(&exists)
+	if errCheck == nil && exists > 0 {
+		http.Error(w, "Kelas '"+item.NamaKelas+"' sudah terdaftar. Nomor rombel tidak boleh duplikat.", http.StatusBadRequest)
+		return
+	}
+
 	if item.TahunAjaranID <= 0 {
 		item.TahunAjaranID = 1
 	}
@@ -225,6 +239,20 @@ func updateKelas(w http.ResponseWriter, r *http.Request, id string) {
 	}
 	if err := json.NewDecoder(r.Body).Decode(&item); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	item.NamaKelas = strings.TrimSpace(item.NamaKelas)
+	if item.NamaKelas == "" {
+		http.Error(w, "Nama kelas wajib diisi", http.StatusBadRequest)
+		return
+	}
+
+	// Cegah duplikasi saat edit ke nama kelas lain yang sudah dipakai
+	var exists int
+	errCheck := config.DB.QueryRow("SELECT COUNT(*) FROM kelas WHERE LOWER(TRIM(nama_kelas)) = LOWER(?) AND id != ?", item.NamaKelas, id).Scan(&exists)
+	if errCheck == nil && exists > 0 {
+		http.Error(w, "Kelas '"+item.NamaKelas+"' sudah digunakan oleh kelas lain. Nomor rombel tidak boleh duplikat.", http.StatusBadRequest)
 		return
 	}
 

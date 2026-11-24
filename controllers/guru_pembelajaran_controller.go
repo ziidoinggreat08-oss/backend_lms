@@ -41,6 +41,74 @@ func getGuruIDByUserID(userID int) int {
 	return guruID
 }
 
+// Helper: cek apakah guru benar-benar mengampu mapel tersebut
+func isGuruMengampuMapel(guruID, mapelID int) bool {
+	var count int
+	err := config.DB.QueryRow(`
+		SELECT COUNT(*) FROM (
+			SELECT mata_pelajaran_id FROM guru_mata_pelajaran WHERE guru_id = ? AND mata_pelajaran_id = ?
+			UNION
+			SELECT mata_pelajaran_id FROM guru_mengajar WHERE guru_id = ? AND mata_pelajaran_id = ?
+		) as t
+	`, guruID, mapelID, guruID, mapelID).Scan(&count)
+	return err == nil && count > 0
+}
+
+type GuruMapelOption struct {
+	ID        int    `json:"id"`
+	KodeMapel string `json:"kode_mapel"`
+	NamaMapel string `json:"nama_mapel"`
+	Kelompok  string `json:"kelompok"`
+	Deskripsi string `json:"deskripsi"`
+}
+
+// HandleGuruMataPelajaran mengembalikan HANYA mata pelajaran yang diampu oleh guru yang sedang login
+func HandleGuruMataPelajaran(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+
+	if r.Method == "OPTIONS" {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	claims, ok := getClaimsFromRequest(r)
+	if !ok {
+		http.Error(w, "Otorisasi diperlukan", http.StatusUnauthorized)
+		return
+	}
+
+	guruID := getGuruIDByUserID(claims.UserID)
+
+	rows, err := config.DB.Query(`
+		SELECT DISTINCT mp.id, mp.kode_mapel, mp.nama_mapel, mp.kelompok, COALESCE(mp.deskripsi, '')
+		FROM mata_pelajaran mp
+		WHERE mp.id IN (
+			SELECT mata_pelajaran_id FROM guru_mata_pelajaran WHERE guru_id = ?
+			UNION
+			SELECT mata_pelajaran_id FROM guru_mengajar WHERE guru_id = ?
+		)
+		ORDER BY mp.nama_mapel
+	`, guruID, guruID)
+	if err != nil {
+		http.Error(w, "Gagal mengambil daftar mata pelajaran guru: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	list := []GuruMapelOption{}
+	for rows.Next() {
+		var item GuruMapelOption
+		if err := rows.Scan(&item.ID, &item.KodeMapel, &item.NamaMapel, &item.Kelompok, &item.Deskripsi); err == nil {
+			list = append(list, item)
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(list)
+}
+
 // -------------------------------------------------------------
 // 1. DASHBOARD & STATS GURU
 // -------------------------------------------------------------
@@ -274,6 +342,11 @@ func createMateri(w http.ResponseWriter, r *http.Request, guruID int) {
 		return
 	}
 
+	if !isGuruMengampuMapel(guruID, input.MapelID) {
+		http.Error(w, "Anda tidak mengampu mata pelajaran ini", http.StatusForbidden)
+		return
+	}
+
 	_, err := config.DB.Exec(`
 		INSERT INTO materi (guru_id, mata_pelajaran_id, kelas_id, judul, deskripsi, file_url, tautan_eksternal)
 		VALUES (?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''))
@@ -417,6 +490,11 @@ func createTugas(w http.ResponseWriter, r *http.Request, guruID int) {
 
 	if strings.TrimSpace(input.Judul) == "" || input.MapelID <= 0 || input.KelasID <= 0 || strings.TrimSpace(input.Deadline) == "" {
 		http.Error(w, "Judul, mata pelajaran, kelas, dan batas waktu (deadline) wajib diisi", http.StatusBadRequest)
+		return
+	}
+
+	if !isGuruMengampuMapel(guruID, input.MapelID) {
+		http.Error(w, "Anda tidak mengampu mata pelajaran ini", http.StatusForbidden)
 		return
 	}
 
@@ -606,6 +684,11 @@ func createKuisUjian(w http.ResponseWriter, r *http.Request, guruID int, forcedT
 
 	if strings.TrimSpace(input.Judul) == "" || input.MapelID <= 0 || input.KelasID <= 0 {
 		http.Error(w, "Judul, mata pelajaran, dan kelas wajib diisi", http.StatusBadRequest)
+		return
+	}
+
+	if !isGuruMengampuMapel(guruID, input.MapelID) {
+		http.Error(w, "Anda tidak mengampu mata pelajaran ini", http.StatusForbidden)
 		return
 	}
 	if forcedType != "" {
