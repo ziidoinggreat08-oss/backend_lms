@@ -542,5 +542,68 @@ func getMigrationList() []migrationItem {
 				SELECT 1, 6 WHERE NOT EXISTS (SELECT 1 FROM guru_mata_pelajaran WHERE guru_id=1 AND mata_pelajaran_id=6);`,
 			},
 		},
+
+		// -------------------------------------------------------------------------
+		// MIGRASI 7: Tabel Multi-File Lampiran Materi, Tugas, dan Pengumpulan Tugas
+		// -------------------------------------------------------------------------
+		{
+			version:     "20261124_07_multifile_attachments",
+			description: "Tabel materi_lampiran, tugas_lampiran, dan pengumpulan_tugas_file untuk dukungan multi-file",
+			queries: []string{
+				`CREATE TABLE IF NOT EXISTS materi_lampiran (
+					id INT AUTO_INCREMENT PRIMARY KEY,
+					materi_id INT NOT NULL,
+					file_url VARCHAR(255) NOT NULL,
+					nama_file VARCHAR(255) NOT NULL,
+					ukuran_file BIGINT NOT NULL DEFAULT 0,
+					tipe_file VARCHAR(100) NULL,
+					created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+					FOREIGN KEY (materi_id) REFERENCES materi(id) ON DELETE CASCADE
+				) ENGINE=InnoDB;`,
+
+				`CREATE TABLE IF NOT EXISTS tugas_lampiran (
+					id INT AUTO_INCREMENT PRIMARY KEY,
+					tugas_id INT NOT NULL,
+					file_url VARCHAR(255) NOT NULL,
+					nama_file VARCHAR(255) NOT NULL,
+					ukuran_file BIGINT NOT NULL DEFAULT 0,
+					tipe_file VARCHAR(100) NULL,
+					created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+					FOREIGN KEY (tugas_id) REFERENCES tugas(id) ON DELETE CASCADE
+				) ENGINE=InnoDB;`,
+
+				`CREATE TABLE IF NOT EXISTS pengumpulan_tugas_file (
+					id INT AUTO_INCREMENT PRIMARY KEY,
+					pengumpulan_id INT NOT NULL,
+					file_url VARCHAR(255) NOT NULL,
+					nama_file VARCHAR(255) NOT NULL,
+					ukuran_file BIGINT NOT NULL DEFAULT 0,
+					tipe_file VARCHAR(100) NULL,
+					created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+					FOREIGN KEY (pengumpulan_id) REFERENCES pengumpulan_tugas(id) ON DELETE CASCADE
+				) ENGINE=InnoDB;`,
+
+				// Salin berkas lama dari tabel materi ke materi_lampiran jika belum ada
+				`INSERT INTO materi_lampiran (materi_id, file_url, nama_file, ukuran_file, tipe_file)
+				SELECT id, file_url, SUBSTRING_INDEX(file_url, '/', -1), 0, 'dokumen'
+				FROM materi
+				WHERE file_url IS NOT NULL AND file_url != ''
+				AND NOT EXISTS (SELECT 1 FROM materi_lampiran ml WHERE ml.materi_id = materi.id);`,
+
+				// Salin berkas lama dari tabel tugas ke tugas_lampiran jika belum ada
+				`INSERT INTO tugas_lampiran (tugas_id, file_url, nama_file, ukuran_file, tipe_file)
+				SELECT id, file_lampiran, SUBSTRING_INDEX(file_lampiran, '/', -1), 0, 'dokumen'
+				FROM tugas
+				WHERE file_lampiran IS NOT NULL AND file_lampiran != ''
+				AND NOT EXISTS (SELECT 1 FROM tugas_lampiran tl WHERE tl.tugas_id = tugas.id);`,
+
+				// Salin berkas lama dari tabel pengumpulan_tugas ke pengumpulan_tugas_file jika belum ada
+				`INSERT INTO pengumpulan_tugas_file (pengumpulan_id, file_url, nama_file, ukuran_file, tipe_file)
+				SELECT id, file_url, SUBSTRING_INDEX(file_url, '/', -1), 0, 'dokumen'
+				FROM pengumpulan_tugas
+				WHERE file_url IS NOT NULL AND file_url != ''
+				AND NOT EXISTS (SELECT 1 FROM pengumpulan_tugas_file ptf WHERE ptf.pengumpulan_id = pengumpulan_tugas.id);`,
+			},
+		},
 	}
 }

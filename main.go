@@ -96,6 +96,8 @@ func main() {
 	http.HandleFunc("/api/guru/ujian", controllers.HandleGuruKuisUjian)
 	http.HandleFunc("/api/guru/ujian/", controllers.HandleGuruKuisUjian)
 	http.HandleFunc("/api/guru/nilai", controllers.HandleGuruNilai)
+	http.HandleFunc("/api/guru/upload", controllers.HandleFileUpload)
+	http.HandleFunc("/api/upload", controllers.HandleFileUpload)
 
 	// Routing Siswa Custom
 	http.HandleFunc("/api/siswa", func(w http.ResponseWriter, r *http.Request) {
@@ -120,6 +122,13 @@ func main() {
 	http.HandleFunc("/api/siswa/profil", controllers.HandleSiswaPortal)
 	http.HandleFunc("/api/siswa/jadwal", controllers.HandleSiswaPortal)
 	http.HandleFunc("/api/siswa/notifikasi", controllers.HandleSiswaPortal)
+
+	// Routing Profil Terpadu Seluruh Role (View-Only)
+	http.HandleFunc("/api/profil/me", controllers.HandleGetMyProfile)
+
+	// Static file server untuk berkas uploads (materi, tugas, screenshot)
+	_ = os.MkdirAll("uploads", 0755)
+	http.Handle("/uploads/", http.StripPrefix("/uploads/", http.FileServer(http.Dir("uploads"))))
 
 	// Route root untuk testing
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {

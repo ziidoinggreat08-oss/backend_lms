@@ -1,14 +1,20 @@
 package controllers
 
 import (
+	"bytes"
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"backend_lms/config"
+	"backend_lms/utils"
 	"github.com/golang-jwt/jwt/v5"
 )
 
@@ -234,27 +240,85 @@ func HandleGuruDashboard(w http.ResponseWriter, r *http.Request) {
 // -------------------------------------------------------------
 // 2. MATERI PEMBELAJARAN
 // -------------------------------------------------------------
+type LampiranItem struct {
+	ID         int    `json:"id,omitempty"`
+	FileURL    string `json:"file_url"`
+	NamaFile   string `json:"nama_file"`
+	UkuranFile int64  `json:"ukuran_file"`
+	TipeFile   string `json:"tipe_file"`
+}
+
 type MateriItem struct {
-	ID        int    `json:"id"`
-	GuruID    int    `json:"guru_id"`
-	MapelID   int    `json:"mata_pelajaran_id"`
-	NamaMapel string `json:"nama_mapel"`
-	KelasID   int    `json:"kelas_id"`
-	NamaKelas string `json:"nama_kelas"`
-	Judul     string `json:"judul"`
-	Deskripsi string `json:"deskripsi"`
-	FileURL   string `json:"file_url"`
-	Tautan    string `json:"tautan_eksternal"`
-	CreatedAt string `json:"created_at"`
+	ID        int            `json:"id"`
+	GuruID    int            `json:"guru_id"`
+	MapelID   int            `json:"mata_pelajaran_id"`
+	NamaMapel string         `json:"nama_mapel"`
+	KelasID   int            `json:"kelas_id"`
+	NamaKelas string         `json:"nama_kelas"`
+	Judul     string         `json:"judul"`
+	Deskripsi string         `json:"deskripsi"`
+	FileURL   string         `json:"file_url"`
+	Tautan    string         `json:"tautan_eksternal"`
+	CreatedAt string         `json:"created_at"`
+	Lampiran  []LampiranItem `json:"lampiran"`
 }
 
 type MateriInput struct {
-	MapelID   int    `json:"mata_pelajaran_id"`
-	KelasID   int    `json:"kelas_id"`
-	Judul     string `json:"judul"`
-	Deskripsi string `json:"deskripsi"`
-	FileURL   string `json:"file_url"`
-	Tautan    string `json:"tautan_eksternal"`
+	MapelID   int            `json:"mata_pelajaran_id"`
+	KelasID   int            `json:"kelas_id"`
+	Judul     string         `json:"judul"`
+	Deskripsi string         `json:"deskripsi"`
+	FileURL   string         `json:"file_url"`
+	Tautan    string         `json:"tautan_eksternal"`
+	Lampiran  []LampiranItem `json:"lampiran"`
+}
+
+func loadMateriLampiran(materiIDs []int) map[int][]LampiranItem {
+	result := make(map[int][]LampiranItem)
+	if len(materiIDs) == 0 {
+		return result
+	}
+	placeholders := make([]string, len(materiIDs))
+	args := make([]interface{}, len(materiIDs))
+	for i, id := range materiIDs {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+	query := fmt.Sprintf("SELECT id, materi_id, file_url, nama_file, ukuran_file, COALESCE(tipe_file, '') FROM materi_lampiran WHERE materi_id IN (%s) ORDER BY id ASC", strings.Join(placeholders, ","))
+	rows, err := config.DB.Query(query, args...)
+	if err != nil {
+		return result
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var item LampiranItem
+		var mID int
+		if err := rows.Scan(&item.ID, &mID, &item.FileURL, &item.NamaFile, &item.UkuranFile, &item.TipeFile); err == nil {
+			result[mID] = append(result[mID], item)
+		}
+	}
+	return result
+}
+
+func saveMateriLampiran(materiID int64, items []LampiranItem) {
+	for _, it := range items {
+		if strings.TrimSpace(it.FileURL) == "" {
+			continue
+		}
+		nama := it.NamaFile
+		if strings.TrimSpace(nama) == "" {
+			nama = filepath.Base(it.FileURL)
+		}
+		tipe := it.TipeFile
+		if tipe == "" {
+			tipe = "dokumen"
+		}
+		config.DB.Exec(`
+			INSERT INTO materi_lampiran (materi_id, file_url, nama_file, ukuran_file, tipe_file)
+			VALUES (?, ?, ?, ?, ?)
+		`, materiID, it.FileURL, nama, it.UkuranFile, tipe)
+	}
 }
 
 func HandleGuruMateri(w http.ResponseWriter, r *http.Request) {
@@ -319,10 +383,30 @@ func getMateriList(w http.ResponseWriter, r *http.Request, guruID int) {
 	defer rows.Close()
 
 	items := []MateriItem{}
+	materiIDs := []int{}
 	for rows.Next() {
 		var m MateriItem
 		if err := rows.Scan(&m.ID, &m.GuruID, &m.MapelID, &m.NamaMapel, &m.KelasID, &m.NamaKelas, &m.Judul, &m.Deskripsi, &m.FileURL, &m.Tautan, &m.CreatedAt); err == nil {
+			m.Lampiran = []LampiranItem{}
 			items = append(items, m)
+			materiIDs = append(materiIDs, m.ID)
+		}
+	}
+
+	// Lampirkan multi-file
+	if len(materiIDs) > 0 {
+		lampiranMap := loadMateriLampiran(materiIDs)
+		for i := range items {
+			if l, ok := lampiranMap[items[i].ID]; ok && len(l) > 0 {
+				items[i].Lampiran = l
+			} else if items[i].FileURL != "" {
+				// Fallback jika belum ada di child table
+				items[i].Lampiran = []LampiranItem{{
+					FileURL:  items[i].FileURL,
+					NamaFile: filepath.Base(items[i].FileURL),
+					TipeFile: "dokumen",
+				}}
+			}
 		}
 	}
 
@@ -347,18 +431,31 @@ func createMateri(w http.ResponseWriter, r *http.Request, guruID int) {
 		return
 	}
 
-	_, err := config.DB.Exec(`
+	mainFileURL := input.FileURL
+	if mainFileURL == "" && len(input.Lampiran) > 0 {
+		mainFileURL = input.Lampiran[0].FileURL
+	}
+
+	res, err := config.DB.Exec(`
 		INSERT INTO materi (guru_id, mata_pelajaran_id, kelas_id, judul, deskripsi, file_url, tautan_eksternal)
 		VALUES (?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''))
-	`, guruID, input.MapelID, input.KelasID, input.Judul, input.Deskripsi, input.FileURL, input.Tautan)
+	`, guruID, input.MapelID, input.KelasID, input.Judul, input.Deskripsi, mainFileURL, input.Tautan)
 
 	if err != nil {
 		http.Error(w, "Gagal menyimpan materi: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
+	materiID, _ := res.LastInsertId()
+	if len(input.Lampiran) > 0 {
+		saveMateriLampiran(materiID, input.Lampiran)
+	}
+
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"message": "Materi pembelajaran berhasil ditambahkan"})
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"message": "Materi pembelajaran berhasil ditambahkan",
+		"id":      materiID,
+	})
 }
 
 func updateMateri(w http.ResponseWriter, r *http.Request, guruID int, id string) {
@@ -368,14 +465,31 @@ func updateMateri(w http.ResponseWriter, r *http.Request, guruID int, id string)
 		return
 	}
 
-	_, err := config.DB.Exec(`
+	mID, err := strconv.Atoi(id)
+	if err != nil {
+		http.Error(w, "ID materi tidak valid", http.StatusBadRequest)
+		return
+	}
+
+	mainFileURL := input.FileURL
+	if mainFileURL == "" && len(input.Lampiran) > 0 {
+		mainFileURL = input.Lampiran[0].FileURL
+	}
+
+	_, err = config.DB.Exec(`
 		UPDATE materi SET mata_pelajaran_id=?, kelas_id=?, judul=?, deskripsi=?, file_url=NULLIF(?, ''), tautan_eksternal=NULLIF(?, '')
 		WHERE id=? AND guru_id=?
-	`, input.MapelID, input.KelasID, input.Judul, input.Deskripsi, input.FileURL, input.Tautan, id, guruID)
+	`, input.MapelID, input.KelasID, input.Judul, input.Deskripsi, mainFileURL, input.Tautan, mID, guruID)
 
 	if err != nil {
 		http.Error(w, "Gagal mengubah materi: "+err.Error(), http.StatusInternalServerError)
 		return
+	}
+
+	// Update lampiran: hapus yang lama, masukkan yang baru
+	config.DB.Exec("DELETE FROM materi_lampiran WHERE materi_id = ?", mID)
+	if len(input.Lampiran) > 0 {
+		saveMateriLampiran(int64(mID), input.Lampiran)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -396,25 +510,75 @@ func deleteMateri(w http.ResponseWriter, r *http.Request, guruID int, id string)
 // 3. TUGAS & PENILAIAN TUGAS
 // -------------------------------------------------------------
 type TugasItem struct {
-	ID          int    `json:"id"`
-	GuruID      int    `json:"guru_id"`
-	MapelID     int    `json:"mata_pelajaran_id"`
-	NamaMapel   string `json:"nama_mapel"`
-	KelasID     int    `json:"kelas_id"`
-	NamaKelas   string `json:"nama_kelas"`
-	Judul       string `json:"judul"`
-	Deskripsi   string `json:"deskripsi"`
-	Deadline    string `json:"deadline"`
-	CreatedAt   string `json:"created_at"`
-	TotalKumpul int    `json:"total_kumpul"`
+	ID          int            `json:"id"`
+	GuruID      int            `json:"guru_id"`
+	MapelID     int            `json:"mata_pelajaran_id"`
+	NamaMapel   string         `json:"nama_mapel"`
+	KelasID     int            `json:"kelas_id"`
+	NamaKelas   string         `json:"nama_kelas"`
+	Judul       string         `json:"judul"`
+	Deskripsi   string         `json:"deskripsi"`
+	Deadline    string         `json:"deadline"`
+	CreatedAt   string         `json:"created_at"`
+	TotalKumpul int            `json:"total_kumpul"`
+	Lampiran    []LampiranItem `json:"lampiran"`
 }
 
 type TugasInput struct {
-	MapelID   int    `json:"mata_pelajaran_id"`
-	KelasID   int    `json:"kelas_id"`
-	Judul     string `json:"judul"`
-	Deskripsi string `json:"deskripsi"`
-	Deadline  string `json:"deadline"`
+	MapelID   int            `json:"mata_pelajaran_id"`
+	KelasID   int            `json:"kelas_id"`
+	Judul     string         `json:"judul"`
+	Deskripsi string         `json:"deskripsi"`
+	Deadline  string         `json:"deadline"`
+	Lampiran  []LampiranItem `json:"lampiran"`
+}
+
+func loadTugasLampiran(tugasIDs []int) map[int][]LampiranItem {
+	result := make(map[int][]LampiranItem)
+	if len(tugasIDs) == 0 {
+		return result
+	}
+	placeholders := make([]string, len(tugasIDs))
+	args := make([]interface{}, len(tugasIDs))
+	for i, id := range tugasIDs {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+	query := fmt.Sprintf("SELECT id, tugas_id, file_url, nama_file, ukuran_file, COALESCE(tipe_file, '') FROM tugas_lampiran WHERE tugas_id IN (%s) ORDER BY id ASC", strings.Join(placeholders, ","))
+	rows, err := config.DB.Query(query, args...)
+	if err != nil {
+		return result
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var item LampiranItem
+		var tID int
+		if err := rows.Scan(&item.ID, &tID, &item.FileURL, &item.NamaFile, &item.UkuranFile, &item.TipeFile); err == nil {
+			result[tID] = append(result[tID], item)
+		}
+	}
+	return result
+}
+
+func saveTugasLampiran(tugasID int64, items []LampiranItem) {
+	for _, it := range items {
+		if strings.TrimSpace(it.FileURL) == "" {
+			continue
+		}
+		nama := it.NamaFile
+		if strings.TrimSpace(nama) == "" {
+			nama = filepath.Base(it.FileURL)
+		}
+		tipe := it.TipeFile
+		if tipe == "" {
+			tipe = "dokumen"
+		}
+		config.DB.Exec(`
+			INSERT INTO tugas_lampiran (tugas_id, file_url, nama_file, ukuran_file, tipe_file)
+			VALUES (?, ?, ?, ?, ?)
+		`, tugasID, it.FileURL, nama, it.UkuranFile, tipe)
+	}
 }
 
 func HandleGuruTugas(w http.ResponseWriter, r *http.Request) {
@@ -455,7 +619,8 @@ func getTugasList(w http.ResponseWriter, r *http.Request, guruID int) {
 		SELECT t.id, t.guru_id, t.mata_pelajaran_id, mp.nama_mapel, t.kelas_id, k.nama_kelas,
 		       t.judul, COALESCE(t.deskripsi, ''), DATE_FORMAT(t.deadline, '%Y-%m-%d %H:%i'),
 		       DATE_FORMAT(t.created_at, '%Y-%m-%d %H:%i'),
-		       (SELECT COUNT(*) FROM pengumpulan_tugas pt WHERE pt.tugas_id = t.id) as total_kumpul
+		       (SELECT COUNT(*) FROM pengumpulan_tugas pt WHERE pt.tugas_id = t.id) as total_kumpul,
+		       COALESCE(t.file_lampiran, '')
 		FROM tugas t
 		JOIN mata_pelajaran mp ON mp.id = t.mata_pelajaran_id
 		JOIN kelas k ON k.id = t.kelas_id
@@ -470,10 +635,32 @@ func getTugasList(w http.ResponseWriter, r *http.Request, guruID int) {
 	defer rows.Close()
 
 	items := []TugasItem{}
+	tugasIDs := []int{}
+	fileLampiranMap := make(map[int]string)
+
 	for rows.Next() {
 		var t TugasItem
-		if err := rows.Scan(&t.ID, &t.GuruID, &t.MapelID, &t.NamaMapel, &t.KelasID, &t.NamaKelas, &t.Judul, &t.Deskripsi, &t.Deadline, &t.CreatedAt, &t.TotalKumpul); err == nil {
+		var fileLampiran string
+		if err := rows.Scan(&t.ID, &t.GuruID, &t.MapelID, &t.NamaMapel, &t.KelasID, &t.NamaKelas, &t.Judul, &t.Deskripsi, &t.Deadline, &t.CreatedAt, &t.TotalKumpul, &fileLampiran); err == nil {
+			t.Lampiran = []LampiranItem{}
 			items = append(items, t)
+			tugasIDs = append(tugasIDs, t.ID)
+			fileLampiranMap[t.ID] = fileLampiran
+		}
+	}
+
+	if len(tugasIDs) > 0 {
+		lampiranMap := loadTugasLampiran(tugasIDs)
+		for i := range items {
+			if l, ok := lampiranMap[items[i].ID]; ok && len(l) > 0 {
+				items[i].Lampiran = l
+			} else if fl := fileLampiranMap[items[i].ID]; fl != "" {
+				items[i].Lampiran = []LampiranItem{{
+					FileURL:  fl,
+					NamaFile: filepath.Base(fl),
+					TipeFile: "dokumen",
+				}}
+			}
 		}
 	}
 
@@ -498,18 +685,31 @@ func createTugas(w http.ResponseWriter, r *http.Request, guruID int) {
 		return
 	}
 
-	_, err := config.DB.Exec(`
-		INSERT INTO tugas (guru_id, mata_pelajaran_id, kelas_id, judul, deskripsi, deadline)
-		VALUES (?, ?, ?, ?, ?, ?)
-	`, guruID, input.MapelID, input.KelasID, input.Judul, input.Deskripsi, input.Deadline)
+	mainFile := ""
+	if len(input.Lampiran) > 0 {
+		mainFile = input.Lampiran[0].FileURL
+	}
+
+	res, err := config.DB.Exec(`
+		INSERT INTO tugas (guru_id, mata_pelajaran_id, kelas_id, judul, deskripsi, deadline, file_lampiran)
+		VALUES (?, ?, ?, ?, ?, ?, NULLIF(?, ''))
+	`, guruID, input.MapelID, input.KelasID, input.Judul, input.Deskripsi, input.Deadline, mainFile)
 
 	if err != nil {
 		http.Error(w, "Gagal membuat tugas: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
+	tugasID, _ := res.LastInsertId()
+	if len(input.Lampiran) > 0 {
+		saveTugasLampiran(tugasID, input.Lampiran)
+	}
+
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"message": "Tugas berhasil dibuat"})
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"message": "Tugas berhasil dibuat",
+		"id":      tugasID,
+	})
 }
 
 func updateTugas(w http.ResponseWriter, r *http.Request, guruID int, id string) {
@@ -519,14 +719,30 @@ func updateTugas(w http.ResponseWriter, r *http.Request, guruID int, id string) 
 		return
 	}
 
-	_, err := config.DB.Exec(`
-		UPDATE tugas SET mata_pelajaran_id=?, kelas_id=?, judul=?, deskripsi=?, deadline=?
+	tID, err := strconv.Atoi(id)
+	if err != nil {
+		http.Error(w, "ID tugas tidak valid", http.StatusBadRequest)
+		return
+	}
+
+	mainFile := ""
+	if len(input.Lampiran) > 0 {
+		mainFile = input.Lampiran[0].FileURL
+	}
+
+	_, err = config.DB.Exec(`
+		UPDATE tugas SET mata_pelajaran_id=?, kelas_id=?, judul=?, deskripsi=?, deadline=?, file_lampiran=NULLIF(?, '')
 		WHERE id=? AND guru_id=?
-	`, input.MapelID, input.KelasID, input.Judul, input.Deskripsi, input.Deadline, id, guruID)
+	`, input.MapelID, input.KelasID, input.Judul, input.Deskripsi, input.Deadline, mainFile, tID, guruID)
 
 	if err != nil {
 		http.Error(w, "Gagal mengubah tugas: "+err.Error(), http.StatusInternalServerError)
 		return
+	}
+
+	config.DB.Exec("DELETE FROM tugas_lampiran WHERE tugas_id = ?", tID)
+	if len(input.Lampiran) > 0 {
+		saveTugasLampiran(int64(tID), input.Lampiran)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -604,6 +820,16 @@ func HandleGuruKuisUjian(w http.ResponseWriter, r *http.Request) {
 	forcedType := ""
 	if len(parts) >= 3 && (parts[2] == "kuis" || parts[2] == "ujian") {
 		forcedType = parts[2]
+	}
+
+	// Endpoint khusus parsing Word soal kuis & unduh template Word
+	if len(parts) > 3 && parts[3] == "parse-word" && r.Method == "POST" {
+		parseWordSoalHandler(w, r)
+		return
+	}
+	if len(parts) > 3 && parts[3] == "template-word" && r.Method == "GET" {
+		downloadSampleWordHandler(w, r)
+		return
 	}
 
 	claims, ok := getClaimsFromRequest(r)
@@ -987,4 +1213,166 @@ func saveNilai(w http.ResponseWriter, r *http.Request, guruID int) {
 		"message":     "Nilai siswa berhasil disimpan",
 		"nilai_akhir": nilaiAkhir,
 	})
+}
+
+// -------------------------------------------------------------
+// 6. IMPOR SOAL DARI WORD (.DOCX) & FILE UPLOAD
+// -------------------------------------------------------------
+
+func parseWordSoalHandler(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseMultipartForm(20 << 20); err != nil {
+		http.Error(w, "Ukuran berkas Word maksimal 20MB", http.StatusBadRequest)
+		return
+	}
+
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		http.Error(w, "Berkas Word (.docx) wajib diunggah", http.StatusBadRequest)
+		return
+	}
+	defer file.Close()
+
+	ext := strings.ToLower(filepath.Ext(header.Filename))
+	if ext != ".docx" {
+		http.Error(w, "Format berkas harus Microsoft Word (.docx)", http.StatusBadRequest)
+		return
+	}
+
+	data, err := io.ReadAll(file)
+	if err != nil {
+		http.Error(w, "Gagal membaca isi berkas Word", http.StatusInternalServerError)
+		return
+	}
+
+	reader := bytes.NewReader(data)
+	soalList, err := utils.ParseDocxQuestions(reader, int64(len(data)))
+	if err != nil {
+		http.Error(w, "Gagal memproses soal Word: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"message": fmt.Sprintf("Berhasil mengekstrak %d soal dari berkas Word", len(soalList)),
+		"total":   len(soalList),
+		"soal":    soalList,
+	})
+}
+
+func downloadSampleWordHandler(w http.ResponseWriter, r *http.Request) {
+	data, err := utils.GenerateSampleDocx()
+	if err != nil {
+		http.Error(w, "Gagal membuat contoh dokumen Word: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+	w.Header().Set("Content-Disposition", `attachment; filename="Template_Soal_Kuis_EduClass.docx"`)
+	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
+	w.WriteHeader(http.StatusOK)
+	w.Write(data)
+}
+
+func HandleFileUpload(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+
+	if r.Method == "OPTIONS" {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if r.Method != "POST" {
+		http.Error(w, "Metode tidak diizinkan", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if err := r.ParseMultipartForm(50 << 20); err != nil {
+		http.Error(w, "Ukuran unggahan terlalu besar (maksimal 50MB)", http.StatusBadRequest)
+		return
+	}
+
+	category := r.URL.Query().Get("category")
+	if category == "" {
+		category = "umum"
+	}
+	category = filepath.Clean(category)
+	if strings.Contains(category, "..") || strings.Contains(category, "/") || strings.Contains(category, "\\") {
+		category = "umum"
+	}
+
+	uploadDir := filepath.Join("uploads", category)
+	if err := os.MkdirAll(uploadDir, 0755); err != nil {
+		http.Error(w, "Gagal membuat folder penyimpanan", http.StatusInternalServerError)
+		return
+	}
+
+	allowed := map[string]string{
+		".pdf":  "pdf",
+		".doc":  "doc",
+		".docx": "docx",
+		".xls":  "excel",
+		".xlsx": "excel",
+		".ppt":  "powerpoint",
+		".pptx": "powerpoint",
+		".png":  "gambar",
+		".jpg":  "gambar",
+		".jpeg": "gambar",
+		".webp": "gambar",
+		".zip":  "zip",
+		".rar":  "zip",
+	}
+
+	var uploadedItems []LampiranItem
+
+	// Periksa r.MultipartForm.File
+	if r.MultipartForm != nil && len(r.MultipartForm.File) > 0 {
+		for _, headers := range r.MultipartForm.File {
+			for _, header := range headers {
+				file, err := header.Open()
+				if err != nil {
+					continue
+				}
+
+				ext := strings.ToLower(filepath.Ext(header.Filename))
+				fileType, ok := allowed[ext]
+				if !ok {
+					file.Close()
+					http.Error(w, fmt.Sprintf("Format berkas '%s' tidak didukung. Harap gunakan PDF, Word, Excel, PPT, Gambar, atau ZIP", header.Filename), http.StatusBadRequest)
+					return
+				}
+
+				cleanName := filepath.Base(header.Filename)
+				uniqueName := fmt.Sprintf("%d_%s", time.Now().UnixNano(), cleanName)
+				targetPath := filepath.Join(uploadDir, uniqueName)
+
+				dst, err := os.Create(targetPath)
+				if err != nil {
+					file.Close()
+					http.Error(w, "Gagal menyimpan berkas", http.StatusInternalServerError)
+					return
+				}
+
+				_, err = io.Copy(dst, file)
+				dst.Close()
+				file.Close()
+
+				if err != nil {
+					http.Error(w, "Gagal menulis berkas", http.StatusInternalServerError)
+					return
+				}
+
+				fileURL := fmt.Sprintf("/uploads/%s/%s", category, uniqueName)
+				uploadedItems = append(uploadedItems, LampiranItem{
+					FileURL:    fileURL,
+					NamaFile:   cleanName,
+					UkuranFile: header.Size,
+					TipeFile:   fileType,
+				})
+			}
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(uploadedItems)
 }

@@ -211,6 +211,22 @@ func createKelas(w http.ResponseWriter, r *http.Request) {
 		item.TahunAjaranID = 1
 	}
 
+	// Validasi aturan 1 guru 1 walas: Cegah guru merangkap menjadi walas di kelas lain
+	if item.WaliKelasID != nil && *item.WaliKelasID > 0 {
+		var kelasNama, guruNama string
+		errWalas := config.DB.QueryRow(`
+			SELECT k.nama_kelas, COALESCE(g.nama_lengkap, 'Guru') 
+			FROM kelas k 
+			JOIN guru g ON g.id = k.wali_kelas_id 
+			WHERE k.wali_kelas_id = ? 
+			LIMIT 1
+		`, *item.WaliKelasID).Scan(&kelasNama, &guruNama)
+		if errWalas == nil && kelasNama != "" {
+			http.Error(w, "Guru "+guruNama+" sudah ditugaskan sebagai wali kelas di kelas "+kelasNama+". Satu guru hanya dapat menjadi wali kelas untuk 1 kelas.", http.StatusBadRequest)
+			return
+		}
+	}
+
 	var err error
 	if item.WaliKelasID != nil && *item.WaliKelasID > 0 {
 		_, err = config.DB.Exec("INSERT INTO kelas (nama_kelas, tingkat, jurusan_id, tahun_ajaran_id, wali_kelas_id) VALUES (?, ?, ?, ?, ?)",
@@ -258,6 +274,22 @@ func updateKelas(w http.ResponseWriter, r *http.Request, id string) {
 
 	if item.TahunAjaranID <= 0 {
 		item.TahunAjaranID = 1
+	}
+
+	// Validasi aturan 1 guru 1 walas: Cegah guru merangkap menjadi walas di kelas lain (kecuali kelas ini sendiri)
+	if item.WaliKelasID != nil && *item.WaliKelasID > 0 {
+		var kelasNama, guruNama string
+		errWalas := config.DB.QueryRow(`
+			SELECT k.nama_kelas, COALESCE(g.nama_lengkap, 'Guru') 
+			FROM kelas k 
+			JOIN guru g ON g.id = k.wali_kelas_id 
+			WHERE k.wali_kelas_id = ? AND k.id != ?
+			LIMIT 1
+		`, *item.WaliKelasID, id).Scan(&kelasNama, &guruNama)
+		if errWalas == nil && kelasNama != "" {
+			http.Error(w, "Guru "+guruNama+" sudah ditugaskan sebagai wali kelas di kelas "+kelasNama+". Satu guru hanya dapat menjadi wali kelas untuk 1 kelas.", http.StatusBadRequest)
+			return
+		}
 	}
 
 	var err error

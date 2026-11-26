@@ -361,6 +361,24 @@ func updateWaliKelas(w http.ResponseWriter, r *http.Request, kelasIDStr string) 
 	if req.WaliKelasID <= 0 {
 		_, updateErr = config.DB.Exec("UPDATE kelas SET wali_kelas_id = NULL WHERE id = ?", kelasID)
 	} else {
+		// Validasi aturan 1 guru 1 walas
+		var kelasNama, guruNama string
+		errWalas := config.DB.QueryRow(`
+			SELECT k.nama_kelas, COALESCE(g.nama_lengkap, 'Guru') 
+			FROM kelas k 
+			JOIN guru g ON g.id = k.wali_kelas_id 
+			WHERE k.wali_kelas_id = ? AND k.id != ?
+			LIMIT 1
+		`, req.WaliKelasID, kelasID).Scan(&kelasNama, &guruNama)
+		if errWalas == nil && kelasNama != "" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{
+				"message": "Guru " + guruNama + " sudah menjadi wali kelas di " + kelasNama + ". Satu guru hanya dapat menjadi wali kelas untuk 1 kelas.",
+			})
+			return
+		}
+
 		_, updateErr = config.DB.Exec("UPDATE kelas SET wali_kelas_id = ? WHERE id = ?", req.WaliKelasID, kelasID)
 	}
 

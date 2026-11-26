@@ -18,6 +18,18 @@ CREATE TABLE IF NOT EXISTS materi (
     FOREIGN KEY (kelas_id) REFERENCES kelas(id) ON DELETE CASCADE
 ) ENGINE=InnoDB;
 
+-- 1.1 Tabel Lampiran Multi-File Materi
+CREATE TABLE IF NOT EXISTS materi_lampiran (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    materi_id INT NOT NULL,
+    file_url VARCHAR(255) NOT NULL,
+    nama_file VARCHAR(255) NOT NULL,
+    ukuran_file BIGINT NOT NULL DEFAULT 0,
+    tipe_file VARCHAR(100) NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (materi_id) REFERENCES materi(id) ON DELETE CASCADE
+) ENGINE=InnoDB;
+
 -- 2. Tabel Tugas
 CREATE TABLE IF NOT EXISTS tugas (
     id INT AUTO_INCREMENT PRIMARY KEY,
@@ -33,6 +45,18 @@ CREATE TABLE IF NOT EXISTS tugas (
     FOREIGN KEY (guru_id) REFERENCES guru(id) ON DELETE CASCADE,
     FOREIGN KEY (mata_pelajaran_id) REFERENCES mata_pelajaran(id) ON DELETE CASCADE,
     FOREIGN KEY (kelas_id) REFERENCES kelas(id) ON DELETE CASCADE
+) ENGINE=InnoDB;
+
+-- 2.1 Tabel Lampiran Multi-File Tugas
+CREATE TABLE IF NOT EXISTS tugas_lampiran (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    tugas_id INT NOT NULL,
+    file_url VARCHAR(255) NOT NULL,
+    nama_file VARCHAR(255) NOT NULL,
+    ukuran_file BIGINT NOT NULL DEFAULT 0,
+    tipe_file VARCHAR(100) NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (tugas_id) REFERENCES tugas(id) ON DELETE CASCADE
 ) ENGINE=InnoDB;
 
 -- 3. Tabel Pengumpulan Tugas Siswa
@@ -51,6 +75,18 @@ CREATE TABLE IF NOT EXISTS pengumpulan_tugas (
     UNIQUE KEY unik_tugas_siswa (tugas_id, siswa_id),
     FOREIGN KEY (tugas_id) REFERENCES tugas(id) ON DELETE CASCADE,
     FOREIGN KEY (siswa_id) REFERENCES siswa(id) ON DELETE CASCADE
+) ENGINE=InnoDB;
+
+-- 3.1 Tabel Berkas Multi-File Pengumpulan Tugas Siswa
+CREATE TABLE IF NOT EXISTS pengumpulan_tugas_file (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    pengumpulan_id INT NOT NULL,
+    file_url VARCHAR(255) NOT NULL,
+    nama_file VARCHAR(255) NOT NULL,
+    ukuran_file BIGINT NOT NULL DEFAULT 0,
+    tipe_file VARCHAR(100) NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (pengumpulan_id) REFERENCES pengumpulan_tugas(id) ON DELETE CASCADE
 ) ENGINE=InnoDB;
 
 -- 4. Tabel Kuis & Ujian

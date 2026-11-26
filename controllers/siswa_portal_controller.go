@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -102,6 +103,39 @@ func siswaMateri(w http.ResponseWriter, r *http.Request, _, kelasID int, p []str
 		writeError(w, 405, "Metode tidak diizinkan")
 		return
 	}
+
+	// Helper muat lampiran multi-file
+	loadLampiranForMateri := func(materiIDs []int) map[int][]map[string]any {
+		res := make(map[int][]map[string]any)
+		if len(materiIDs) == 0 {
+			return res
+		}
+		ph := make([]string, len(materiIDs))
+		args := make([]interface{}, len(materiIDs))
+		for i, id := range materiIDs {
+			ph[i] = "?"
+			args[i] = id
+		}
+		rows, err := config.DB.Query(fmt.Sprintf(`SELECT materi_id, file_url, nama_file, ukuran_file, COALESCE(tipe_file, 'dokumen') FROM materi_lampiran WHERE materi_id IN (%s) ORDER BY id ASC`, strings.Join(ph, ",")), args...)
+		if err == nil {
+			defer rows.Close()
+			for rows.Next() {
+				var mID int
+				var fURL, fName, fType string
+				var fSize int64
+				if err := rows.Scan(&mID, &fURL, &fName, &fSize, &fType); err == nil {
+					res[mID] = append(res[mID], map[string]any{
+						"file_url":    fURL,
+						"nama_file":   fName,
+						"ukuran_file": fSize,
+						"tipe_file":   fType,
+					})
+				}
+			}
+		}
+		return res
+	}
+
 	if len(p) > 1 {
 		id, err := strconv.Atoi(p[1])
 		if err != nil {
@@ -118,22 +152,64 @@ func siswaMateri(w http.ResponseWriter, r *http.Request, _, kelasID int, p []str
 			writeError(w, 500, "Gagal memuat materi")
 			return
 		}
-		json.NewEncoder(w).Encode(map[string]any{"id": id, "judul": judul, "deskripsi": deskripsi, "file_url": file, "tautan_eksternal": tautan, "mata_pelajaran": mapel, "guru": guru, "created_at": created})
+		lampiranList := loadLampiranForMateri([]int{id})[id]
+		if len(lampiranList) == 0 && file != "" {
+			lampiranList = []map[string]any{{
+				"file_url":    file,
+				"nama_file":   filepath.Base(file),
+				"ukuran_file": 0,
+				"tipe_file":   "dokumen",
+			}}
+		}
+		json.NewEncoder(w).Encode(map[string]any{
+			"id":               id,
+			"judul":            judul,
+			"deskripsi":        deskripsi,
+			"file_url":         file,
+			"tautan_eksternal": tautan,
+			"mata_pelajaran":   mapel,
+			"guru":             guru,
+			"created_at":       created,
+			"lampiran":         lampiranList,
+		})
 		return
 	}
+
 	rows, err := config.DB.Query(`SELECT m.id,m.judul,COALESCE(m.deskripsi,''),COALESCE(m.file_url,''),COALESCE(m.tautan_eksternal,''),mp.nama_mapel,g.nama_lengkap,DATE_FORMAT(m.created_at,'%Y-%m-%d %H:%i') FROM materi m JOIN mata_pelajaran mp ON mp.id=m.mata_pelajaran_id JOIN guru g ON g.id=m.guru_id WHERE m.kelas_id=? ORDER BY m.id DESC`, kelasID)
 	if err != nil {
 		writeError(w, 500, "Gagal memuat materi")
 		return
 	}
 	defer rows.Close()
+
 	out := []map[string]any{}
+	materiIDs := []int{}
 	for rows.Next() {
 		var id int
 		var a, b, c, d, e, f, g string
 		rows.Scan(&id, &a, &b, &c, &d, &e, &f, &g)
-		out = append(out, map[string]any{"id": id, "judul": a, "deskripsi": b, "file_url": c, "tautan_eksternal": d, "mata_pelajaran": e, "guru": f, "created_at": g})
+		out = append(out, map[string]any{"id": id, "judul": a, "deskripsi": b, "file_url": c, "tautan_eksternal": d, "mata_pelajaran": e, "guru": f, "created_at": g, "lampiran": []map[string]any{}})
+		materiIDs = append(materiIDs, id)
 	}
+
+	if len(materiIDs) > 0 {
+		lampiranMap := loadLampiranForMateri(materiIDs)
+		for i := range out {
+			mID := out[i]["id"].(int)
+			fURL := out[i]["file_url"].(string)
+			if l, ok := lampiranMap[mID]; ok && len(l) > 0 {
+				out[i]["lampiran"] = l
+			} else if fURL != "" {
+				out[i]["lampiran"] = []map[string]any{{
+					"file_url":    fURL,
+					"nama_file":   filepath.Base(fURL),
+					"ukuran_file": 0,
+					"tipe_file":   "dokumen",
+				}}
+			}
+		}
+	}
+
 	json.NewEncoder(w).Encode(out)
 }
 
@@ -260,13 +336,42 @@ func submitEvaluasi(w http.ResponseWriter, r *http.Request, siswaID, kelasID, id
 }
 func siswaProfil(w http.ResponseWriter, r *http.Request, siswaID, userID int) {
 	if r.Method == http.MethodGet {
-		var nama, nis, username, email, kelas, jurusan, phone, alamat string
-		err := config.DB.QueryRow(`SELECT s.nama_lengkap,s.nis,u.username,u.email,k.nama_kelas,j.nama_jurusan,COALESCE(s.no_telepon,''),COALESCE(s.alamat,'') FROM siswa s JOIN users u ON u.id=s.user_id JOIN kelas k ON k.id=s.kelas_id JOIN jurusan j ON j.id=s.jurusan_id WHERE s.id=?`, siswaID).Scan(&nama, &nis, &username, &email, &kelas, &jurusan, &phone, &alamat)
+		var nama, nis, nisn, username, email, kelas, jurusan, jk, tmpLahir, tglLahir, phone, alamat string
+		err := config.DB.QueryRow(`
+			SELECT s.nama_lengkap, s.nis, COALESCE(NULLIF(s.nisn, ''), '-'),
+			       u.username, u.email,
+			       COALESCE(k.nama_kelas, '-'), COALESCE(j.nama_jurusan, '-'),
+			       CASE WHEN s.jenis_kelamin = 'P' THEN 'Perempuan' 
+			            WHEN s.jenis_kelamin = 'L' THEN 'Laki-laki' 
+			            ELSE COALESCE(NULLIF(s.jenis_kelamin, ''), '-') END,
+			       COALESCE(NULLIF(s.tempat_lahir, ''), '-'),
+			       COALESCE(DATE_FORMAT(s.tanggal_lahir, '%d %M %Y'), '-'),
+			       COALESCE(NULLIF(s.no_telepon, ''), '-'),
+			       COALESCE(NULLIF(s.alamat, ''), '-')
+			FROM siswa s 
+			JOIN users u ON u.id = s.user_id 
+			LEFT JOIN kelas k ON k.id = s.kelas_id 
+			LEFT JOIN jurusan j ON j.id = s.jurusan_id 
+			WHERE s.id = ?
+		`, siswaID).Scan(&nama, &nis, &nisn, &username, &email, &kelas, &jurusan, &jk, &tmpLahir, &tglLahir, &phone, &alamat)
 		if err != nil {
-			writeError(w, 500, "Gagal memuat profil")
+			writeError(w, 500, "Gagal memuat profil: "+err.Error())
 			return
 		}
-		json.NewEncoder(w).Encode(map[string]string{"nama_lengkap": nama, "nis": nis, "username": username, "email": email, "kelas": kelas, "jurusan": jurusan, "no_telepon": phone, "alamat": alamat})
+		json.NewEncoder(w).Encode(map[string]string{
+			"nama_lengkap":  nama,
+			"nis":           nis,
+			"nisn":          nisn,
+			"username":      username,
+			"email":         email,
+			"kelas":         kelas,
+			"jurusan":       jurusan,
+			"jenis_kelamin": jk,
+			"tempat_lahir":  tmpLahir,
+			"tanggal_lahir": tglLahir,
+			"no_telepon":    phone,
+			"alamat":        alamat,
+		})
 		return
 	}
 	if r.Method == http.MethodPut {
@@ -310,7 +415,8 @@ func daftarTugas(w http.ResponseWriter, siswaID, kelasID int) {
 		COALESCE(p.catatan_siswa, ''),
 		COALESCE(p.status, 'belum_dinilai'),
 		COALESCE(p.nilai, 0),
-		COALESCE(p.catatan_guru, '')
+		COALESCE(p.catatan_guru, ''),
+		COALESCE(p.id, 0)
 	FROM tugas t 
 	JOIN mata_pelajaran mp ON mp.id=t.mata_pelajaran_id 
 	JOIN guru g ON g.id=t.guru_id 
@@ -322,33 +428,128 @@ func daftarTugas(w http.ResponseWriter, siswaID, kelasID int) {
 		return
 	}
 	defer rows.Close()
+
 	out := []map[string]any{}
+	tugasIDs := []int{}
+	pengumpulanIDs := []int{}
+
 	for rows.Next() {
 		var id int
 		var judul, deskripsi, mapel, guru, tanggalDiberikan, deadline, waktuKumpul, status string
 		var fileLampiran, fileUrl, catatanSiswa, statusPenilaian, catatanGuru string
 		var nilai float64
-		if err := rows.Scan(&id, &judul, &deskripsi, &mapel, &guru, &tanggalDiberikan, &deadline, &waktuKumpul, &status, &fileLampiran, &fileUrl, &catatanSiswa, &statusPenilaian, &nilai, &catatanGuru); err != nil {
+		var pID int
+		if err := rows.Scan(&id, &judul, &deskripsi, &mapel, &guru, &tanggalDiberikan, &deadline, &waktuKumpul, &status, &fileLampiran, &fileUrl, &catatanSiswa, &statusPenilaian, &nilai, &catatanGuru, &pID); err != nil {
 			continue
 		}
+		tugasIDs = append(tugasIDs, id)
+		if pID > 0 {
+			pengumpulanIDs = append(pengumpulanIDs, pID)
+		}
 		out = append(out, map[string]any{
-			"id":                id,
-			"judul":             judul,
-			"deskripsi":         deskripsi,
-			"mata_pelajaran":    mapel,
-			"guru":              guru,
-			"tanggal_diberikan": tanggalDiberikan,
-			"deadline":          deadline,
-			"waktu_kumpul":      waktuKumpul,
-			"status":            status,
-			"file_lampiran":     fileLampiran,
-			"file_url":          fileUrl,
-			"catatan_siswa":     catatanSiswa,
-			"status_penilaian":  statusPenilaian,
-			"nilai":             nilai,
-			"catatan_guru":      catatanGuru,
+			"id":                 id,
+			"pengumpulan_id":     pID,
+			"judul":              judul,
+			"deskripsi":          deskripsi,
+			"mata_pelajaran":     mapel,
+			"guru":               guru,
+			"tanggal_diberikan":  tanggalDiberikan,
+			"deadline":           deadline,
+			"waktu_kumpul":       waktuKumpul,
+			"status":             status,
+			"file_lampiran":      fileLampiran,
+			"file_url":           fileUrl,
+			"catatan_siswa":      catatanSiswa,
+			"status_penilaian":   statusPenilaian,
+			"nilai":              nilai,
+			"catatan_guru":       catatanGuru,
+			"lampiran_guru":      []map[string]any{},
+			"berkas_pengumpulan": []map[string]any{},
 		})
 	}
+
+	// 1. Muat lampiran guru
+	if len(tugasIDs) > 0 {
+		ph := make([]string, len(tugasIDs))
+		args := make([]interface{}, len(tugasIDs))
+		for i, id := range tugasIDs {
+			ph[i] = "?"
+			args[i] = id
+		}
+		tRows, err := config.DB.Query(fmt.Sprintf(`SELECT tugas_id, file_url, nama_file, ukuran_file, COALESCE(tipe_file, 'dokumen') FROM tugas_lampiran WHERE tugas_id IN (%s) ORDER BY id ASC`, strings.Join(ph, ",")), args...)
+		if err == nil {
+			defer tRows.Close()
+			tLampiranMap := make(map[int][]map[string]any)
+			for tRows.Next() {
+				var tID int
+				var fURL, fName, fType string
+				var fSize int64
+				if err := tRows.Scan(&tID, &fURL, &fName, &fSize, &fType); err == nil {
+					tLampiranMap[tID] = append(tLampiranMap[tID], map[string]any{
+						"file_url":    fURL,
+						"nama_file":   fName,
+						"ukuran_file": fSize,
+						"tipe_file":   fType,
+					})
+				}
+			}
+			for i := range out {
+				tID := out[i]["id"].(int)
+				if l, ok := tLampiranMap[tID]; ok && len(l) > 0 {
+					out[i]["lampiran_guru"] = l
+				} else if fl := out[i]["file_lampiran"].(string); fl != "" {
+					out[i]["lampiran_guru"] = []map[string]any{{
+						"file_url":    fl,
+						"nama_file":   filepath.Base(fl),
+						"ukuran_file": 0,
+						"tipe_file":   "dokumen",
+					}}
+				}
+			}
+		}
+	}
+
+	// 2. Muat berkas pengumpulan siswa
+	if len(pengumpulanIDs) > 0 {
+		ph := make([]string, len(pengumpulanIDs))
+		args := make([]interface{}, len(pengumpulanIDs))
+		for i, id := range pengumpulanIDs {
+			ph[i] = "?"
+			args[i] = id
+		}
+		pRows, err := config.DB.Query(fmt.Sprintf(`SELECT pengumpulan_id, file_url, nama_file, ukuran_file, COALESCE(tipe_file, 'dokumen') FROM pengumpulan_tugas_file WHERE pengumpulan_id IN (%s) ORDER BY id ASC`, strings.Join(ph, ",")), args...)
+		if err == nil {
+			defer pRows.Close()
+			pFilesMap := make(map[int][]map[string]any)
+			for pRows.Next() {
+				var pID int
+				var fURL, fName, fType string
+				var fSize int64
+				if err := pRows.Scan(&pID, &fURL, &fName, &fSize, &fType); err == nil {
+					pFilesMap[pID] = append(pFilesMap[pID], map[string]any{
+						"file_url":    fURL,
+						"nama_file":   fName,
+						"ukuran_file": fSize,
+						"tipe_file":   fType,
+					})
+				}
+			}
+			for i := range out {
+				pID := out[i]["pengumpulan_id"].(int)
+				if bf, ok := pFilesMap[pID]; ok && len(bf) > 0 {
+					out[i]["berkas_pengumpulan"] = bf
+				} else if fu := out[i]["file_url"].(string); fu != "" {
+					out[i]["berkas_pengumpulan"] = []map[string]any{{
+						"file_url":    fu,
+						"nama_file":   filepath.Base(fu),
+						"ukuran_file": 0,
+						"tipe_file":   "dokumen",
+					}}
+				}
+			}
+		}
+	}
+
 	json.NewEncoder(w).Encode(out)
 }
 func siswaTugas(w http.ResponseWriter, r *http.Request, siswaID, kelasID int, p []string) {
@@ -374,43 +575,99 @@ func unggahTugas(w http.ResponseWriter, r *http.Request, siswaID, kelasID int, i
 		writeError(w, 404, "Tugas tidak ditemukan")
 		return
 	}
-	if err := r.ParseMultipartForm(10 << 20); err != nil {
-		writeError(w, 400, "Ukuran berkas maksimal 10 MB")
+	if err := r.ParseMultipartForm(50 << 20); err != nil {
+		writeError(w, 400, "Ukuran berkas maksimal 50 MB")
 		return
 	}
-	file, header, err := r.FormFile("file")
-	if err != nil {
-		writeError(w, 400, "Berkas wajib diunggah")
-		return
+
+	catatanSiswa := strings.TrimSpace(r.FormValue("catatan_siswa"))
+
+	allowed := map[string]string{
+		".pdf":  "pdf",
+		".doc":  "doc",
+		".docx": "docx",
+		".xls":  "excel",
+		".xlsx": "excel",
+		".ppt":  "powerpoint",
+		".pptx": "powerpoint",
+		".png":  "gambar",
+		".jpg":  "gambar",
+		".jpeg": "gambar",
+		".webp": "gambar",
+		".zip":  "zip",
+		".rar":  "zip",
 	}
-	defer file.Close()
-	ext := strings.ToLower(filepath.Ext(header.Filename))
-	if ext != ".pdf" && ext != ".doc" && ext != ".docx" && ext != ".zip" {
-		writeError(w, 400, "Format berkas harus PDF, DOC, DOCX, atau ZIP")
-		return
+
+	// Kumpulkan seluruh berkas dari field "files" atau "file"
+	var allHeaders []*multipart.FileHeader
+	if r.MultipartForm != nil {
+		if files, ok := r.MultipartForm.File["files"]; ok {
+			allHeaders = append(allHeaders, files...)
+		}
+		if fileSingle, ok := r.MultipartForm.File["file"]; ok && len(allHeaders) == 0 {
+			allHeaders = append(allHeaders, fileSingle...)
+		}
 	}
-	if header.Size > 10<<20 {
-		writeError(w, 400, "Ukuran berkas maksimal 10 MB")
-		return
-	}
+
 	dir := filepath.Join("uploads", "tugas", strconv.Itoa(siswaID))
 	if err := os.MkdirAll(dir, 0750); err != nil {
 		writeError(w, 500, "Gagal menyiapkan penyimpanan")
 		return
 	}
-	name := fmt.Sprintf("%d_%d%s", id, time.Now().UnixNano(), ext)
-	dst, err := os.OpenFile(filepath.Join(dir, name), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0640)
-	if err != nil {
-		writeError(w, 500, "Gagal menyimpan berkas")
-		return
+
+	type savedFile struct {
+		fileURL  string
+		fileName string
+		fileSize int64
+		fileType string
 	}
-	defer dst.Close()
-	if _, err = io.Copy(dst, file); err != nil {
-		writeError(w, 500, "Gagal menyimpan berkas")
-		return
+	var savedFiles []savedFile
+
+	for _, header := range allHeaders {
+		ext := strings.ToLower(filepath.Ext(header.Filename))
+		fileType, ok := allowed[ext]
+		if !ok {
+			writeError(w, 400, fmt.Sprintf("Format berkas '%s' tidak didukung", header.Filename))
+			return
+		}
+		if header.Size > 50<<20 {
+			writeError(w, 400, "Ukuran berkas terlalu besar")
+			return
+		}
+
+		f, err := header.Open()
+		if err != nil {
+			continue
+		}
+
+		cleanName := filepath.Base(header.Filename)
+		uniqueName := fmt.Sprintf("%d_%d%s", id, time.Now().UnixNano(), ext)
+		dstPath := filepath.Join(dir, uniqueName)
+
+		dst, err := os.OpenFile(dstPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0640)
+		if err != nil {
+			f.Close()
+			writeError(w, 500, "Gagal menyimpan berkas")
+			return
+		}
+
+		_, err = io.Copy(dst, f)
+		dst.Close()
+		f.Close()
+
+		if err != nil {
+			writeError(w, 500, "Gagal menyimpan berkas")
+			return
+		}
+
+		url := "/uploads/tugas/" + strconv.Itoa(siswaID) + "/" + uniqueName
+		savedFiles = append(savedFiles, savedFile{
+			fileURL:  url,
+			fileName: cleanName,
+			fileSize: header.Size,
+			fileType: fileType,
+		})
 	}
-	url := "/uploads/tugas/" + strconv.Itoa(siswaID) + "/" + name
-	catatanSiswa := strings.TrimSpace(r.FormValue("catatan_siswa"))
 
 	tx, err := config.DB.Begin()
 	if err != nil {
@@ -418,22 +675,47 @@ func unggahTugas(w http.ResponseWriter, r *http.Request, siswaID, kelasID int, i
 		return
 	}
 	defer tx.Rollback()
+
 	var pengumpulanID int64
-	err = tx.QueryRow("SELECT id FROM pengumpulan_tugas WHERE tugas_id=? AND siswa_id=?", id, siswaID).Scan(&pengumpulanID)
+	var existingFileURL string
+	err = tx.QueryRow("SELECT id, COALESCE(file_url, '') FROM pengumpulan_tugas WHERE tugas_id=? AND siswa_id=?", id, siswaID).Scan(&pengumpulanID, &existingFileURL)
+
+	mainURL := existingFileURL
+	if len(savedFiles) > 0 {
+		mainURL = savedFiles[0].fileURL
+	}
+
 	if err == sql.ErrNoRows {
-		res, e := tx.Exec("INSERT INTO pengumpulan_tugas(tugas_id,siswa_id,file_url,catatan_siswa,status) VALUES(?,?,?,?,'belum_dinilai')", id, siswaID, url, catatanSiswa)
+		if len(savedFiles) == 0 {
+			writeError(w, 400, "Berkas tugas wajib diunggah")
+			return
+		}
+		res, e := tx.Exec("INSERT INTO pengumpulan_tugas(tugas_id,siswa_id,file_url,catatan_siswa,status) VALUES(?,?,?,?,'belum_dinilai')", id, siswaID, mainURL, catatanSiswa)
 		err = e
 		pengumpulanID, _ = res.LastInsertId()
 	} else if err == nil {
-		_, err = tx.Exec("UPDATE pengumpulan_tugas SET file_url=?,catatan_siswa=?,waktu_kumpul=NOW() WHERE id=?", url, catatanSiswa, pengumpulanID)
+		_, err = tx.Exec("UPDATE pengumpulan_tugas SET file_url=?,catatan_siswa=?,waktu_kumpul=NOW() WHERE id=?", mainURL, catatanSiswa, pengumpulanID)
 	}
-	if err == nil {
-		_, err = tx.Exec("INSERT INTO riwayat_pengumpulan_tugas(pengumpulan_id,file_url) VALUES(?,?)", pengumpulanID, url)
-	}
+
 	if err != nil {
 		writeError(w, 500, "Gagal menyimpan pengumpulan")
 		return
 	}
+
+	// Simpan berkas-berkas ke pengumpulan_tugas_file
+	for _, sf := range savedFiles {
+		_, err = tx.Exec(`
+			INSERT INTO pengumpulan_tugas_file (pengumpulan_id, file_url, nama_file, ukuran_file, tipe_file)
+			VALUES (?, ?, ?, ?, ?)
+		`, pengumpulanID, sf.fileURL, sf.fileName, sf.fileSize, sf.fileType)
+		if err != nil {
+			writeError(w, 500, "Gagal menyimpan berkas pengumpulan")
+			return
+		}
+		// Riwayat pengumpulan
+		tx.Exec("INSERT INTO riwayat_pengumpulan_tugas(pengumpulan_id,file_url) VALUES(?,?)", pengumpulanID, sf.fileURL)
+	}
+
 	if err = tx.Commit(); err != nil {
 		writeError(w, 500, "Gagal menyimpan pengumpulan")
 		return
